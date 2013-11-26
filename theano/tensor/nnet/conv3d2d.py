@@ -1,4 +1,5 @@
 import theano
+from theano.compat import any
 from theano.gradient import DisconnectedType
 from theano.gof import Op, Apply
 from theano import tensor
@@ -11,7 +12,10 @@ def get_diagonal_subtensor_view(x, i0, i1):
 
     :note: it return a partial view of x, not a partial copy.
     """
-
+    # We have to cast i0 and i0 to int because python 2.4 (and maybe later)
+    # do not support indexing with 0-dim, 'int*' ndarrays.
+    i0 = int(i0)
+    i1 = int(i1)
     if x.shape[i0] < x.shape[i1]:
         raise NotImplementedError('is this allowed?')
     idx = [slice(None)] * x.ndim
@@ -174,8 +178,15 @@ def conv3d(signals, filters,
     if isinstance(border_mode, str):
         border_mode = (border_mode, border_mode, border_mode)
 
-    _signals_shape_5d = signals.shape if signals_shape is None else signals_shape
-    _filters_shape_5d = filters.shape if filters_shape is None else filters_shape
+    if signals_shape is None:
+        _signals_shape_5d = signals.shape
+    else:
+        _signals_shape_5d = signals_shape
+
+    if filters_shape is None:
+        _filters_shape_5d = filters.shape
+    else:
+        _filters_shape_5d = filters_shape
 
     _signals_shape_4d = (
         _signals_shape_5d[0] * _signals_shape_5d[1],
