@@ -4,6 +4,7 @@ import sys
 import unittest
 
 from nose.plugins.skip import SkipTest
+from nose.plugins.attrib import attr
 import numpy
 
 import theano
@@ -87,7 +88,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         f = inplace_func([], t, mode=self.mode)
         topo = f.maker.fgraph.toposort()
         topo_ = [node for node in topo if not isinstance(node.op,
-             self.ignore_topo)]
+                                                         self.ignore_topo)]
         assert len(topo_) == 1
         if not list:
             assert isinstance(topo_[0].op, self.sub)
@@ -364,18 +365,38 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         f = inplace_func([], gn, mode=self.mode)
         topo = f.maker.fgraph.toposort()
         topo_ = [node for node in topo if not isinstance(node.op,
-             self.ignore_topo)]
+                                                         self.ignore_topo)]
         if not self.fast_compile:
             assert len(topo_) == 6
         assert numpy.sum([isinstance(node.op, self.inc_sub)
-             for node in topo_]) == 1
+                          for node in topo_]) == 1
         assert numpy.sum([isinstance(node.op, self.sub)
-             for node in topo_]) == 1
+                          for node in topo_]) == 1
         gval = f()
 
         good = numpy.zeros_like(data)
         good[subi:, subi] = numpy.exp(data[subi:, subi])
         self.assertTrue(numpy.allclose(gval, good), (gval, good))
+
+    def test_grad_2d_inc_set_subtensor(self):
+        for n_shape, m_shape in [
+            [(2, 3), (2, 2)],
+            [(3, 2), (2, 2)],
+            [(3, 2), (1, 2)],
+            [(3, 2), (2,)],
+        ]:
+            for op in [inc_subtensor, set_subtensor]:
+                subi = 2
+                data = numpy.asarray(rand(*n_shape), dtype=self.dtype)
+                n = self.shared(data)
+                z = scal.constant(subi)
+                m = matrix('m', dtype=self.dtype)
+                mv = numpy.asarray(rand(*m_shape), dtype=self.dtype)
+
+                t = op(n[:z, :z], m)
+                gn, gm = theano.tensor.grad(theano.tensor.sum(t), [n, m])
+                utt.verify_grad(lambda m: op(n[:z, :z], m), [mv])
+                utt.verify_grad(lambda nn: op(nn[:z, :z], mv), [data])
 
     def test_grad_0d(self):
         data = numpy.asarray(rand(2, 3), dtype=self.dtype)
@@ -430,7 +451,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
             self.assertTrue(numpy.allclose(val, good), (val, good))
 
             # Test reuse of output memory
-            if isinstance(self.adv_sub1, tensor.AdvancedSubtensor1):
+            if type(self.adv_sub1) == tensor.AdvancedSubtensor1:
                 op = self.adv_sub1()
                 # When idx is a TensorConstant.
                 if hasattr(idx, "data"):
@@ -499,6 +520,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         self.assertTrue(isinstance(topo_[0].op, self.adv_sub1))
         self.assertTrue(numpy.allclose(f([0]), ones[0] * 5))
 
+    @attr('slow')
     def test_shape_i_const(self):
         # Each axis is treated independently by shape_i/shape operators
 
@@ -756,6 +778,7 @@ class T_subtensor(unittest.TestCase, utt.TestOptimizationMixin):
         except TypeError:
             pass
 
+    @attr('slow')
     def test_grad_list(self):
         data = rand(4)
         data = numpy.asarray(data, dtype=self.dtype)

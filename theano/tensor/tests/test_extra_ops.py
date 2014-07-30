@@ -1,17 +1,107 @@
 import numpy as np
 import numpy
+import unittest
 
 import theano
 from theano.tests import unittest_tools as utt
-from theano.tensor.extra_ops import (BinCountOp, bincount, DiffOp, diff,
-        squeeze, RepeatOp, repeat, Bartlett, bartlett,
-        FillDiagonal, fill_diagonal)
+
+from theano.tensor.extra_ops import (CumsumOp, cumsum, CumprodOp, cumprod,
+                                     BinCountOp, bincount, DiffOp, diff,
+                                     squeeze, RepeatOp, repeat, Bartlett, bartlett,
+                                     FillDiagonal, fill_diagonal, FillDiagonalOffset,
+                                     fill_diagonal_offset)
 from theano import tensor as T
 from theano import config, tensor, function
 
 
 numpy_ver = [int(n) for n in numpy.__version__.split('.')[:2]]
 numpy_16 = bool(numpy_ver >= [1, 6])
+
+class TestCumsumOp(utt.InferShapeTester):
+
+    def setUp(self):
+        super(TestCumsumOp, self).setUp()
+        self.op_class = CumsumOp
+        self.op = CumsumOp()
+
+    def test_cumsumOp(self):
+        x = T.tensor3('x')
+        a = np.random.random((3, 5, 2)).astype(config.floatX)
+
+        f = theano.function([x], cumsum(x))
+        assert np.allclose(np.cumsum(a), f(a))  # Test axis=None
+
+        for axis in range(len(a.shape)):
+            f = theano.function([x], cumsum(x, axis=axis))
+            assert np.allclose(np.cumsum(a, axis=axis), f(a))
+
+
+    def test_infer_shape(self):
+        x = T.tensor3('x')
+        a = np.random.random((3, 5, 2)).astype(config.floatX)
+
+        # Test axis=None
+        self._compile_and_check([x],
+                                [self.op(x)],
+                                [a],
+                                self.op_class)
+
+        for axis in range(len(a.shape)):
+            self._compile_and_check([x],
+                                    [cumsum(x, axis=axis)],
+                                    [a],
+                                    self.op_class)
+
+    def test_grad(self):
+        a = np.random.random((3, 5, 2)).astype(config.floatX)
+
+        utt.verify_grad(self.op, [a])  # Test axis=None
+
+        for axis in range(len(a.shape)):
+            utt.verify_grad(self.op_class(axis=axis), [a])
+
+
+class TestCumprodOp(utt.InferShapeTester):
+
+    def setUp(self):
+        super(TestCumprodOp, self).setUp()
+        self.op_class = CumprodOp
+        self.op = CumprodOp()
+
+    def test_CumprodOp(self):
+        x = T.tensor3('x')
+        a = np.random.random((3, 5, 2)).astype(config.floatX)
+
+        f = theano.function([x], cumprod(x))
+        assert np.allclose(np.cumprod(a), f(a))  # Test axis=None
+
+        for axis in range(len(a.shape)):
+            f = theano.function([x], cumprod(x, axis=axis))
+            assert np.allclose(np.cumprod(a, axis=axis), f(a))
+
+    def test_infer_shape(self):
+        x = T.tensor3('x')
+        a = np.random.random((3, 5, 2)).astype(config.floatX)
+
+        # Test axis=None
+        self._compile_and_check([x],
+                                [self.op(x)],
+                                [a],
+                                self.op_class)
+
+        for axis in range(len(a.shape)):
+            self._compile_and_check([x],
+                                    [cumprod(x, axis=axis)],
+                                    [a],
+                                    self.op_class)
+
+    def test_grad(self):
+        a = np.random.random((3, 5, 2)).astype(config.floatX)
+
+        utt.verify_grad(self.op, [a])  # Test axis=None
+
+        for axis in range(len(a.shape)):
+            utt.verify_grad(self.op_class(axis=axis), [a])
 
 
 class TestBinCountOp(utt.InferShapeTester):
@@ -203,10 +293,10 @@ class TestRepeatOp(utt.InferShapeTester):
         self.op = RepeatOp()
         # uint64 always fails
         # int64 and uint32 also fail if python int are 32-bit
-        int_bitwidth = theano.gof.python_int_bitwidth()
-        if int_bitwidth == 64:
+        ptr_bitwidth = theano.gof.local_bitwidth()
+        if ptr_bitwidth == 64:
             self.numpy_unsupported_dtypes = ('uint64',)
-        if int_bitwidth == 32:
+        if ptr_bitwidth == 32:
             self.numpy_unsupported_dtypes = ('uint32', 'int64', 'uint64')
 
     def test_repeatOp(self):
@@ -319,13 +409,6 @@ class TestBartlett(utt.InferShapeTester):
         self._compile_and_check([x], [self.op(x)], [1], self.op_class)
 
 
-if __name__ == "__main__":
-    t = TestBartlett('setUp')
-    t.setUp()
-    t.test_perform()
-    t.test_infer_shape()
-
-
 class TestFillDiagonal(utt.InferShapeTester):
 
     rng = numpy.random.RandomState(43)
@@ -383,10 +466,64 @@ class TestFillDiagonal(utt.InferShapeTester):
                                 self.op_class,
                                 warn=False)
 
-if __name__ == "__main__":
-    utt.unittest.main()
-    t = TestFillDiagonal('setUp')
-    t.setUp()
-    t.test_perform()
-    t.test_gradient()
-    t.test_infer_shape()
+class TestFillDiagonalOffset(utt.InferShapeTester):
+
+    rng = numpy.random.RandomState(43)
+
+    def setUp(self):
+        super(TestFillDiagonalOffset, self).setUp()
+        self.op_class = FillDiagonalOffset
+        self.op = fill_diagonal_offset
+
+    def test_perform(self):
+        x = tensor.matrix()
+        y = tensor.scalar()
+        z = tensor.iscalar()
+
+        f = function([x, y, z], fill_diagonal_offset(x, y, z))
+        for test_offset in (-5, -4, -1, 0, 1, 4, 5):
+            for shp in [(8, 8), (5, 8), (8, 5), (5, 5)]:
+                a = numpy.random.rand(*shp).astype(config.floatX)
+                val = numpy.cast[config.floatX](numpy.random.rand())
+                out = f(a, val, test_offset)
+                # We can't use numpy.fill_diagonal as it is bugged.
+                assert numpy.allclose(numpy.diag(out, test_offset), val)
+                if test_offset >= 0:
+                   assert (out == val).sum() == min( min(a.shape), 
+                                            a.shape[1]-test_offset )
+                else:
+                    assert (out == val).sum() == min( min(a.shape), 
+                                            a.shape[0]+test_offset )
+
+    def test_gradient(self):
+        for test_offset in (-5, -4, -1, 0, 1, 4, 5):
+            # input 'offset' will not be tested
+            def fill_diagonal_with_fix_offset( a, val):
+                return fill_diagonal_offset( a, val, test_offset)
+
+            utt.verify_grad(fill_diagonal_with_fix_offset, 
+                        [numpy.random.rand(5, 8), numpy.random.rand()],
+                            n_tests=1, rng=TestFillDiagonalOffset.rng)
+            utt.verify_grad(fill_diagonal_with_fix_offset, 
+                        [numpy.random.rand(8, 5), numpy.random.rand()],
+                            n_tests=1, rng=TestFillDiagonalOffset.rng)
+            utt.verify_grad(fill_diagonal_with_fix_offset, 
+                        [numpy.random.rand(5, 5), numpy.random.rand()],
+                            n_tests=1, rng=TestFillDiagonalOffset.rng)
+
+    def test_infer_shape(self):
+        x = tensor.dmatrix()
+        y = tensor.dscalar()
+        z = tensor.iscalar()
+        for test_offset in (-5, -4, -1, 0, 1, 4, 5):
+            self._compile_and_check([x, y, z], [self.op(x, y, z)],
+                                    [numpy.random.rand(8, 5),
+                                     numpy.random.rand(),
+                                     test_offset],
+                                     self.op_class )
+            self._compile_and_check([x, y, z], [self.op(x, y, z)],
+                                    [numpy.random.rand(5, 8),
+                                     numpy.random.rand(),
+                                     test_offset],
+                                     self.op_class )
+

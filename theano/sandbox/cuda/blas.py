@@ -124,8 +124,8 @@ class GpuDot22Scalar(GpuOp):
         return """
         #define REAL float
         float %(name)s_a = (PyArray_TYPE(%(a)s) == NPY_FLOAT)
-        ? (REAL)(((float*)%(a)s->data)[0])
-        : (REAL)(((double*)%(a)s->data)[0]);
+        ? (REAL)(((float*)PyArray_DATA(%(a)s))[0])
+        : (REAL)(((double*)PyArray_DATA(%(a)s))[0]);
         #undef REAL
         if (%(x)s->nd != 2)
         {
@@ -232,12 +232,12 @@ class GpuGemm(GpuOp):
 
         #define REAL float
         float %(name)s_a = (PyArray_TYPE(%(a)s) == NPY_FLOAT)
-        ? (REAL)(((float*)%(a)s->data)[0])
-        : (REAL)(((double*)%(a)s->data)[0]);
+        ? (REAL)(((float*)PyArray_DATA(%(a)s))[0])
+        : (REAL)(((double*)PyArray_DATA(%(a)s))[0]);
 
         float %(name)s_b = (PyArray_TYPE(%(b)s) == NPY_FLOAT) ?
-        (REAL)(((float*)%(b)s->data)[0])
-        : (REAL)(((double*)%(b)s->data)[0]);
+        (REAL)(((float*)PyArray_DATA(%(b)s))[0])
+        : (REAL)(((double*)PyArray_DATA(%(b)s))[0]);
         #undef REAL
 
         if (%(inplace)s
@@ -344,8 +344,8 @@ class GpuGemv(GpuOp):
         sio = StringIO()
 
         print >> sio, """
-        float %(name)s_alpha = ((dtype_%(a)s*)(%(a)s->data))[0];
-        float %(name)s_beta = ((dtype_%(b)s*)(%(b)s->data))[0];
+        float %(name)s_alpha = ((dtype_%(a)s*)(PyArray_DATA(%(a)s)))[0];
+        float %(name)s_beta = ((dtype_%(b)s*)(PyArray_DATA(%(b)s)))[0];
 
         if (%(inplace)s
             && ((CudaNdarray_HOST_STRIDES(%(z_in)s)[0] > 0)
@@ -441,7 +441,7 @@ class GpuGer(GpuOp):
         sio = StringIO()
 
         print >> sio, """
-        float %(name)s_alpha = ((dtype_%(a)s*)(%(a)s->data))[0];
+        float %(name)s_alpha = ((dtype_%(a)s*)(PyArray_DATA(%(a)s)))[0];
 
         if (%(inplace)s
             && (CudaNdarray_HOST_STRIDES(%(z_in)s)[0] >= 0)
@@ -523,21 +523,21 @@ class GpuConv(GpuOp):
             imshp=None,
             max_threads_dim0=None):
         """
-        :param version: each version of c_code implement many kernel for the
+        :param version: each version of c_code implements many kernel for the
                         convolution. By default we try to guess the best one.
                         You can force one version with this parameter. This
                         parameter is used by the tests.
         :param verbose: for value of 1,2 and 3. Print more information during
                         the execution of the convolution. Mostly used for
                         optimization or debugging.
-        :param kshp:    The size of the kernel. If provided, can genera
+        :param kshp:    The size of the kernel. If provided, can generate
                         faster code. If the GpuConv op is automatically
                         inserted,
                         we take its value automatically from the Conv op.
         :param imshp:   The size of the image. Not used for code generation but
-                        allow to select an experimental new version in another
+                        allows to select an experimental new version in another
                         repo.
-        :param max_threads_dim0: The maximum number of thread for the
+        :param max_threads_dim0: The maximum number of threads for the
                         block size dimensions 0 (blockDim.x) used by the
                         GPU function.
 
@@ -627,7 +627,7 @@ class GpuConv(GpuOp):
         out, = outputs
         assert images[1] == kerns[1]
         flops = 0
-        if self.out_mode == "valid":
+        if self.border_mode == "valid":
             # nb mul and add by output pixel
             flops = kerns[2] * kerns[3] * 2
             # nb flops by output image
@@ -662,7 +662,7 @@ class GpuConv(GpuOp):
 
     def c_compile_args(self):
         nb = 0
-        if self.kshp is not None:
+        if (self.kshp is not None) and (self.kshp[1] is not None):
             nb = self.kshp[1]
         return ['-DTHEANO_KERN_WID=' + str(nb)]  # ,'-g','-G']
 
@@ -671,7 +671,7 @@ class GpuConv(GpuOp):
 
     def c_code_cache_version(self):
         # raise this whenever modifying any of the support_code_files
-        return (0, 20)
+        return (0, 21)
 
     def c_support_code_apply(self, node, nodename):
         # REMEMBER TO RAISE c_code_cache_version when changing any of

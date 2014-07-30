@@ -1,5 +1,6 @@
 import os
 import shutil
+import sys
 from tempfile import mkdtemp
 import time
 import unittest
@@ -7,6 +8,7 @@ import unittest
 import cPickle
 import numpy
 from nose.plugins.skip import SkipTest
+from nose.plugins.attrib import attr
 from numpy.testing import dec
 
 import theano
@@ -14,7 +16,7 @@ import theano.sandbox.rng_mrg
 from theano import tensor
 from theano.compile.pfunc import rebuild_collect_shared
 from theano.gof.python25 import any
-from theano.tests  import unittest_tools as utt
+from theano.tests import unittest_tools as utt
 import theano.scalar.sharedvar
 from theano.gof.python25 import OrderedDict
 from theano.compat import PY3
@@ -44,7 +46,7 @@ mode_with_gpu = mode_with_opt.including('gpu', 'scan')
 class multiple_outputs_numeric_grad:
     """WRITEME"""
     type_eps = {'float64': 1e-7,
-            'float32': 3e-3}
+                'float32': 3e-3}
 
     def __init__(self, f, pt, ndarray_mask=None, eps=None):
         """Return the gradient of f at pt.
@@ -79,12 +81,12 @@ class multiple_outputs_numeric_grad:
             if ndarray_mask[i]:
                 pt[i] = numpy.array(p)
                 _eps = multiple_outputs_numeric_grad.type_eps[str(
-                                            pt[i].dtype)]
+                    pt[i].dtype)]
                 if _eps > dtype_eps:
                     dtype_eps = _eps
 
         self.ndarray_mask = ndarray_mask
-        #'''
+        # '''
         # Compute clean output:
         f_x = f(*pt)
         gx = []
@@ -146,7 +148,7 @@ class multiple_outputs_numeric_grad:
             return numpy.inf, 0
 
 
-#TODO: Test this function, and if it works,
+# TODO: Test this function, and if it works,
 # use it with the normal verify_grad rather than the
 # copy-and-pasted one above.
 # Also - add a reference to this technique in the
@@ -199,7 +201,6 @@ def grab_scan_node(output):
 
 
 class T_Scan(unittest.TestCase):
-#class T_Scan(object):
 
     def setUp(self):
         utt.seed_rng()
@@ -228,7 +229,7 @@ class T_Scan(unittest.TestCase):
                                 updates=updates,
                                 allow_input_downcast=True)
 
-        ### TESTING PICKLE-ing this function
+        # TESTING PICKLE-ing this function
         origdir = os.getcwd()
         tmpdir = None
         try:
@@ -365,7 +366,7 @@ class T_Scan(unittest.TestCase):
     # This first version test the first case in the optimizer to the gpu.
     def test_one_sequence_one_output_weights_gpu1(self):
         from theano.sandbox import cuda
-        if cuda.cuda_available == False:
+        if not cuda.cuda_available:
             raise SkipTest('Optional package cuda disabled')
 
         def f_rnn(u_t, x_tm1, W_in, W):
@@ -445,7 +446,7 @@ class T_Scan(unittest.TestCase):
     # This second version test the second case in the optimizer to the gpu.
     def test_one_sequence_one_output_weights_gpu2(self):
         from theano.sandbox import cuda
-        if cuda.cuda_available == False:
+        if not cuda.cuda_available:
             raise SkipTest('Optional package cuda disabled')
 
         def f_rnn(u_t, x_tm1, W_in, W):
@@ -509,7 +510,7 @@ class T_Scan(unittest.TestCase):
     # outputs when is running on GPU
     def test_gpu3_mixture_dtype_outputs(self):
         from theano.sandbox import cuda
-        if cuda.cuda_available == False:
+        if not cuda.cuda_available:
             raise SkipTest('Optional package cuda disabled')
 
         def f_rnn(u_t, x_tm1, W_in, W):
@@ -593,11 +594,11 @@ class T_Scan(unittest.TestCase):
         v_out = numpy.zeros((4,))
         v_out[0] = v_u[0] * W_in.get_value() + v_x0 * W.get_value()
         for step in xrange(1, 4):
-            v_out[step] = v_u[step] * W_in.get_value() + \
-                    v_out[step - 1] * W.get_value()
+            v_out[step] = (v_u[step] * W_in.get_value() +
+                           v_out[step - 1] * W.get_value())
 
         theano_values = f3(v_u, v_x0)
-        assert  numpy.allclose(theano_values, v_out)
+        assert numpy.allclose(theano_values, v_out)
 
     # some rnn with multiple outputs and multiple inputs; other
     # dimension instead of scalars/vectors
@@ -622,7 +623,7 @@ class T_Scan(unittest.TestCase):
         y0 = theano.tensor.scalar('y0')
 
         def f_rnn_cmpl(u1_t, u2_t, x_tm1, y_tm1, W_in1):
-            return [theano.dot(u1_t, W_in1) + u2_t * W_in2 + \
+            return [theano.dot(u1_t, W_in1) + u2_t * W_in2 +
                     theano.dot(x_tm1, W), theano.dot(x_tm1, W_out)]
 
         outputs, updates = theano.scan(f_rnn_cmpl,
@@ -641,12 +642,12 @@ class T_Scan(unittest.TestCase):
         # compute the values in numpy
         v_x = numpy.zeros((3, 2), dtype=theano.config.floatX)
         v_y = numpy.zeros((3,), dtype=theano.config.floatX)
-        v_x[0] = numpy.dot(v_u1[0], vW_in1) + v_u2[0] * vW_in2 + \
-                    numpy.dot(v_x0, vW)
+        v_x[0] = (numpy.dot(v_u1[0], vW_in1) + v_u2[0] * vW_in2 +
+                  numpy.dot(v_x0, vW))
         v_y[0] = numpy.dot(v_x0, vWout)
         for i in xrange(1, 3):
-            v_x[i] = numpy.dot(v_u1[i], vW_in1) + v_u2[i] * vW_in2 + \
-                        numpy.dot(v_x[i - 1], vW)
+            v_x[i] = (numpy.dot(v_u1[i], vW_in1) + v_u2[i] * vW_in2 +
+                      numpy.dot(v_x[i - 1], vW))
             v_y[i] = numpy.dot(v_x[i - 1], vWout)
 
         (theano_x, theano_y) = f4(v_u1, v_u2, v_x0, v_y0, vW_in1)
@@ -682,9 +683,9 @@ class T_Scan(unittest.TestCase):
                        y_tm1,
                        y_tm3,
                        W_in1):
-            return [theano.dot(u1_t, W_in1) + \
-                        (u2_t + u2_tm1 * u2_tp1) * W_in2 + \
-                        theano.dot(x_tm1, W),
+            return [theano.dot(u1_t, W_in1) +
+                    (u2_t + u2_tm1 * u2_tp1) * W_in2 +
+                    theano.dot(x_tm1, W),
                     (y_tm1 + y_tm3) * theano.dot(x_tm1, W_out),
                     theano.dot(u1_t, W_in1)]
 
@@ -889,10 +890,10 @@ class T_Scan(unittest.TestCase):
         numpy_x0[0] = vu0[0] * vW_in + vx0 * vW + vu1[0] * vu2[0]
         numpy_x1[0] = vu0[0] * vW_in + vx1 * vW + vu1[0] + vu2[0]
         for i in xrange(1, 3):
-            numpy_x0[i] = vu0[i] * vW_in + numpy_x0[i - 1] * vW + \
-                    vu1[i] * vu2[i]
-            numpy_x1[i] = vu0[i] * vW_in + numpy_x1[i - 1] * vW + \
-                    vu1[i] + vu2[i]
+            numpy_x0[i] = (vu0[i] * vW_in + numpy_x0[i - 1] * vW +
+                           vu1[i] * vu2[i])
+            numpy_x1[i] = (vu0[i] * vW_in + numpy_x1[i - 1] * vW +
+                           vu1[i] + vu2[i])
 
         # note theano computes inplace, so call function after numpy
         # equivalent is done
@@ -906,8 +907,8 @@ class T_Scan(unittest.TestCase):
         # Old way of doing inplace operations is deprecated .. tests don't
         # make sense anymore.
 
-        ##utt.assert_allclose( theano_x0 , vu2)
-        ## utt.assert_allclose( theano_x1 , vu1)
+        ## utt.assert_allclose(theano_x0 , vu2)
+        ## utt.assert_allclose(theano_x1 , vu1)
 
     # simple rnn ; compute inplace version 2
     def test_inplace2(self):
@@ -963,16 +964,16 @@ class T_Scan(unittest.TestCase):
                      if isinstance(x.op, theano.scan_module.scan_op.Scan)]
         assert 0 in scan_node[0].op.destroy_map.keys()
         assert 1 in scan_node[0].op.destroy_map.keys()
-       # compute output in numpy
+        # compute output in numpy
         numpy_x0 = numpy.zeros((3,))
         numpy_x1 = numpy.zeros((3,))
         numpy_x0[0] = vu0[0] * vW_in + vx0 * vW + vu1[0] * vu1[1]
         numpy_x1[0] = vu0[0] * vW_in + vx1 * vW + vu2[0] + vu2[1] + vu2[2]
         for i in xrange(1, 3):
-            numpy_x0[i] = vu0[i] * vW_in + numpy_x0[i - 1] * vW + \
-                    vu1[i] * vu1[i + 1]
-            numpy_x1[i] = vu0[i] * vW_in + numpy_x1[i - 1] * vW + \
-                    vu2[i] + vu2[i + 1] + vu2[i + 2]
+            numpy_x0[i] = (vu0[i] * vW_in + numpy_x0[i - 1] * vW +
+                           vu1[i] * vu1[i + 1])
+            numpy_x1[i] = (vu0[i] * vW_in + numpy_x1[i - 1] * vW +
+                           vu2[i] + vu2[i + 1] + vu2[i + 2])
 
         # note theano computes inplace, so call function after numpy
         # equivalent is done
@@ -1067,8 +1068,8 @@ class T_Scan(unittest.TestCase):
         y1 = theano.shared(vy1, 'y1')
 
         def f(u1_t, u2_t, y0_tm3, y0_tm2, y0_tm1, y1_tm1):
-            y0_t = theano.dot(theano.dot(u1_t, W1), W2) + 0.1 * y0_tm1 + \
-                    0.33 * y0_tm2 + 0.17 * y0_tm3
+            y0_t = (theano.dot(theano.dot(u1_t, W1), W2) + 0.1 * y0_tm1 +
+                    0.33 * y0_tm2 + 0.17 * y0_tm3)
             y1_t = theano.dot(u2_t, W2) + y1_tm1
             y2_t = theano.dot(u1_t, W1)
             nwW1 = W1 + .1
@@ -1104,14 +1105,13 @@ class T_Scan(unittest.TestCase):
         numpy_W1 = vW1.copy()
         numpy_W2 = vW2.copy()
         for idx in xrange(3):
-            numpy_y0[idx + 3] = numpy.dot(\
-                                          numpy.dot(vu1[idx, :], numpy_W1), \
+            numpy_y0[idx + 3] = numpy.dot(numpy.dot(vu1[idx, :], numpy_W1),
                                           numpy_W2) + \
                                 0.1 * numpy_y0[idx + 2] + \
                                 0.33 * numpy_y0[idx + 1] + \
                                 0.17 * numpy_y0[idx]
-            numpy_y1[idx + 1] = numpy.dot(vu2[idx, :], numpy_W2) +\
-                                numpy_y1[idx]
+            numpy_y1[idx + 1] = (numpy.dot(vu2[idx, :], numpy_W2) +
+                                 numpy_y1[idx])
             numpy_y2[idx] = numpy.dot(vu1[idx, :], numpy_W1)
             numpy_W1 = numpy_W1 + .1
             numpy_W2 = numpy_W2 + .05
@@ -1166,7 +1166,7 @@ class T_Scan(unittest.TestCase):
 
     def test_simple_shared_random(self):
         theano_rng = theano.tensor.shared_randomstreams.RandomStreams(
-                            utt.fetch_seed())
+            utt.fetch_seed())
 
         values, updates = theano.scan(lambda: theano_rng.uniform((2,), -1, 1),
                                       [],
@@ -1194,7 +1194,7 @@ class T_Scan(unittest.TestCase):
 
     def test_cuda_gibbs_chain(self):
         from theano.sandbox import cuda
-        if cuda.cuda_available == False:
+        if not cuda.cuda_available:
             raise SkipTest('Optional package cuda disabled')
 
         rng = numpy.random.RandomState(utt.fetch_seed())
@@ -1202,7 +1202,7 @@ class T_Scan(unittest.TestCase):
                                 dtype='float32')
         vsample = theano.shared(v_vsample)
         trng = theano.sandbox.rng_mrg.MRG_RandomStreams(
-                                utt.fetch_seed())
+            utt.fetch_seed())
 
         def f(vsample_tm1):
             return trng.binomial(vsample_tm1.shape, n=1, p=0.3,
@@ -1238,7 +1238,7 @@ class T_Scan(unittest.TestCase):
         bvis = theano.shared(v_bvis, 'vbvis')
         vsample = theano.tensor.matrix(dtype='float32')
         trng = theano.tensor.shared_randomstreams.RandomStreams(
-                                utt.fetch_seed())
+            utt.fetch_seed())
 
         def f(vsample_tm1):
             hmean_t = theano.tensor.nnet.sigmoid(
@@ -1524,6 +1524,7 @@ class T_Scan(unittest.TestCase):
                              analytic_grad[max_err_pos],
                              num_grad.gx[max_err_pos]))
 
+    @attr('slow')
     def test_grad_multiple_outs_taps(self):
         l = 5
         rng = numpy.random.RandomState(utt.fetch_seed())
@@ -1585,17 +1586,19 @@ class T_Scan(unittest.TestCase):
             vparams = [v_u1, v_u2, v_x0, v_y0, vW_in1]
             params = [u1, u2, x0, y0, W_in1]
             gparams = theano.tensor.grad(cost, params)
-            grad_fn = theano.function([u1, u2, x0, y0, W_in1],
-                                      gparams,
-                                      updates=updates,
-                                      no_default_updates=True,
-                                      allow_input_downcast=True)
-
+            print >> sys.stderr, "."
             cost_fn = theano.function([u1, u2, x0, y0, W_in1],
                                       cost,
                                       updates=updates,
                                       no_default_updates=True,
                                       allow_input_downcast=True)
+            print >> sys.stderr, "."
+            grad_fn = theano.function([u1, u2, x0, y0, W_in1],
+                                      gparams,
+                                      updates=updates,
+                                      no_default_updates=True,
+                                      allow_input_downcast=True)
+            print >> sys.stderr, "."
         finally:
             theano.config.compute_test_value = old1
             theano.config.compute_test_value_opt = old2
@@ -1615,6 +1618,7 @@ class T_Scan(unittest.TestCase):
                              analytic_grad[max_err_pos],
                              num_grad.gx[max_err_pos]))
 
+    @attr('slow')
     def test_grad_multiple_outs_taps_backwards(self):
         l = 5
         rng = numpy.random.RandomState(utt.fetch_seed())
@@ -1958,7 +1962,7 @@ class T_Scan(unittest.TestCase):
         f2 = theano.clone(f1,
                           replace=None,
                           strict=True,
-                          copy_inputs=True)
+                          share_inputs=True)
         f2_inp = theano.gof.graph.inputs([f2])
 
         assert z  in f2_inp
@@ -1977,7 +1981,7 @@ class T_Scan(unittest.TestCase):
         f2 = theano.clone(f1,
                           replace=None,
                           strict=True,
-                          copy_inputs=False)
+                          share_inputs=False)
         f2_inp = theano.gof.graph.inputs([f2])
 
         assert not z in f2_inp
@@ -1997,7 +2001,7 @@ class T_Scan(unittest.TestCase):
         f2 = theano.clone(f1,
                           replace=OrderedDict([(y, y2)]),
                           strict=True,
-                          copy_inputs=True)
+                          share_inputs=True)
         f2_inp = theano.gof.graph.inputs([f2])
         assert z in f2_inp
         assert x in f2_inp
@@ -2016,7 +2020,7 @@ class T_Scan(unittest.TestCase):
         f2 = theano.clone(f1,
                           replace=OrderedDict([(y, y2)]),
                           strict=False,
-                          copy_inputs=True)
+                          share_inputs=True)
         f2_inp = theano.gof.graph.inputs([f2])
         assert z in f2_inp
         assert x in f2_inp
@@ -2035,7 +2039,7 @@ class T_Scan(unittest.TestCase):
         f2 = theano.clone(f1,
                           replace=[(y, y2)],
                           strict=True,
-                          copy_inputs=False)
+                          share_inputs=False)
         f2_inp = theano.gof.graph.inputs([f2])
         assert not z in f2_inp
         assert not x in f2_inp
@@ -2054,7 +2058,7 @@ class T_Scan(unittest.TestCase):
         f2 = theano.clone(f1,
                           replace=[(y, y2)],
                           strict=False,
-                          copy_inputs=False)
+                          share_inputs=False)
         f2_inp = theano.gof.graph.inputs([f2])
         assert not z  in f2_inp
         assert not x  in f2_inp
@@ -2596,6 +2600,7 @@ class T_Scan(unittest.TestCase):
         f2 = theano.function([], gx)
         utt.assert_allclose(f2(), numpy.ones((10,)))
 
+    @attr('slow')
     def test_rop2(self):
         seed = utt.fetch_seed()
         rng = numpy.random.RandomState(seed)
@@ -3656,6 +3661,7 @@ class T_Scan(unittest.TestCase):
             inp = scan_node.op.outer_non_seqs(scan_node)
             assert len(inp) == 1
 
+    @attr('slow')
     def test_hessian_bug_grad_grad_two_scans(self):
         #Bug reported by Bitton Tenessi
 

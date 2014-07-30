@@ -1,6 +1,7 @@
 import time
 
 from nose.plugins.skip import SkipTest
+from nose.plugins.attrib import attr
 import numpy
 
 import theano
@@ -11,9 +12,11 @@ from theano.tensor.basic import _allclose, NotScalarConstantError
 
 
 class TestConv2D(utt.InferShapeTester):
+    mode = None
+    dtype = 'float64'
 
     def setUp(self):
-        super (TestConv2D, self).setUp()
+        super(TestConv2D, self).setUp()
         self.input = T.dtensor4('input')
         self.input.name = 'default_V'
         self.filters = T.dtensor4('filters')
@@ -66,11 +69,11 @@ class TestConv2D(utt.InferShapeTester):
 
         output = sym_conv2d(input, filters)
         output.name = 'conv2d(%s,%s)' % (input.name, filters.name)
-        theano_conv = theano.function([input, filters], output)
+        theano_conv = theano.function([input, filters], output, mode=self.mode)
 
         # initialize input and compute result
-        image_data = numpy.random.random(N_image_shape)
-        filter_data = numpy.random.random(N_filter_shape)
+        image_data = numpy.random.random(N_image_shape).astype(self.dtype)
+        filter_data = numpy.random.random(N_filter_shape).astype(self.dtype)
         try:
             theano_output = theano_conv(image_data, filter_data)
         except ValueError:
@@ -246,6 +249,7 @@ class TestConv2D(utt.InferShapeTester):
                       N_image_shape=(2, 3, 3, 3),  N_filter_shape=(5, 3, 2, 2),
                       should_raise=True)
 
+    @attr('slow')
     def test_subsample(self):
         """
         Tests convolution where subsampling != (1,1)
@@ -282,6 +286,7 @@ class TestConv2D(utt.InferShapeTester):
                           (3, 2, 8, 8), (4, 3, 5, 5),
                           'valid')
 
+    @attr('slow')
     def test_invalid_input_shape(self):
         """
         Tests that when the shape gived at build time is not the same as

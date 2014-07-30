@@ -29,6 +29,9 @@ AddConfigVar('pycuda.init',
         BoolParam(False),
         in_c_key=False)
 
+AddConfigVar('cublas.lib',
+        """Name of the cuda blas library for the linker.""",
+        StrParam('cublas'))
 
 #is_nvcc_available called here to initialize global vars in
 #nvcc_compiler module
@@ -152,7 +155,7 @@ if compile_cuda_ndarray and cuda_available:
                             'cuda_ndarray',
                             code,
                             location=cuda_ndarray_loc,
-                            include_dirs=[cuda_path], libs=['cublas'],
+                            include_dirs=[cuda_path], libs=[config.cublas.lib],
                             preargs=['-O3'] + compiler.compile_args())
                     from cuda_ndarray.cuda_ndarray import *
             except Exception, e:
@@ -233,7 +236,7 @@ class GpuOp(theano.gof.Op):
                                              compute_map, no_recycling)
 
 theano.compile.debugmode.default_make_thunk.append(
-                                        get_unbound_function(GpuOp.make_thunk))
+    get_unbound_function(GpuOp.make_thunk))
 
 # We must do those import to be able to create the full doc when
 # nvcc is not available

@@ -31,6 +31,7 @@ config = theano.config
 
 _atexit_print_list = []
 _atexit_print_file = sys.stderr
+_atexit_registered = False
 
 AddConfigVar('profiling.time_thunks',
              """Time individual thunks when profiling""",
@@ -99,7 +100,7 @@ def _atexit_print_fn():
                     n_apply_to_print=config.profiling.n_apply)
 
 
-atexit.register(_atexit_print_fn)
+
 
 
 class ProfileStats(object):
@@ -208,6 +209,10 @@ class ProfileStats(object):
         if atexit_print:
             global _atexit_print_list
             _atexit_print_list.append(self)
+            global _atexit_registered
+            if not _atexit_registered:
+                atexit.register(_atexit_print_fn)
+                _atexit_registered = True
 
     def class_time(self):
         """dict op -> total time on thunks"""
@@ -342,10 +347,10 @@ class ProfileStats(object):
         es += ['   %2s ']
 
         hs += ['<#call>']
-        es += ['  %4d  ']
+        es += ['%6d  ']
 
         hs += ['<#apply>']
-        es += ['  %4d  ']
+        es += [' %4d  ']
 
         upto_length = numpy.sum([len(x) for x in hs]) + len(hs)
         maxlen = self.line_width - upto_length
@@ -362,9 +367,12 @@ class ProfileStats(object):
                 continue
             tot += t
             ftot = tot * 100 / local_time
+            # Remove the useless start and end of the class name:
+            # "<class 'theano.sandbox.cuda.blas.GpuDot22'>" -> "theano.sandbox.cuda.blas.GpuDot22"
+            class_name = str(a)[8:-2][:maxlen]
             print >> file, format_str % (f, ftot, t, t / nb_call,
                                          impl, nb_call,
-                                         nb_apply, str(a)[:maxlen])
+                                         nb_apply, class_name)
             # While this carries over less information, it is arranged such
             # that it way more readeable that the previous output of the
             # profiler
@@ -504,13 +512,22 @@ class ProfileStats(object):
 
         print >> file, header_str
 
-        atimes = [(
+        topos = {}  # Only do the topo once per fct.
+        atimes = []
+        for a, t in self.apply_time.items():
+            if a.fgraph not in topos:
+                topo = a.fgraph.toposort()
+                topos[a.fgraph] = topo
+            else:
+                topo = topos[a.fgraph]
+            atimes.append((
                 t * 100 / local_time,
                 t,
                 a,
-                a.fgraph.toposort().index(a),
-                self.apply_callcount[a])
-            for a, t in self.apply_time.items()]
+                topo.index(a),
+                self.apply_callcount[a]))
+        del topos
+
         atimes.sort()
         atimes.reverse()
         tot = 0
@@ -575,6 +592,7 @@ class ProfileStats(object):
                 print >> file, '  Time in thunks: %es (%.3f%%)' % (
                         local_time, 100*local_time / self.fct_call_time)
         print >> file, '  Total compile time: %es' % self.compile_time
+        print >> file, '    Number of Apply nodes: %s' % len(self.apply_time)
         print >> file, '    Theano Optimizer time: %es' % self.optimizer_time
         print >> file, '       Theano validate time: %es' % self.validate_time
         print >> file, ('    Theano Linker time (includes C,'
@@ -616,38 +634,38 @@ class ProfileStats(object):
         max_running_max_memory_size = 0
         max_node_memory_saved_by_view = 0
         max_node_memory_saved_by_inplace = 0
-        for fgraph, nodes_mem in fct_memory.iteritems():
-            # Sum of the size of all variables in bytes
-            sum_size = sum([sum([v for v in val if not isinstance(v, str)])
-                            for key, val in nodes_mem.iteritems()])
-            # Sum of the size of all variables that actually allocate
-            # memory (excluding views, and inplace);
-            node_memory_size = 0
-            # The sum of memory saved by returning view instead of new
-            # allocation
-            node_memory_saved_by_view = 0
-            # The sum of memory saved by reusing the input instead of
-            # new allocation
-            node_memory_saved_by_inplace = 0
-            # The memory allocated after the current apply node
-            running_memory_size = 0
-            # The maximum of running_memory_size during the function
-            running_max_memory_size = 0
 
-            order = fgraph.toposort()
-            # A list of intermediate variable that are not need
-            # after the execution of the corresponding node.
-            # It mean that after executing the node,
-            # the corresponding variable can be gc.
-            post_thunk_old_storage = []
-            computed, last_user = theano.gof.link.gc_helper(order)
-            for node in order:
-                post_thunk_old_storage.append([
-                    input_idx
-                    for input_idx, input in enumerate(node.inputs)
-                    if (input in computed) and
-                    (input not in fgraph.outputs) and
-                    node == last_user[input]])
+        # statistic with the new order
+        new_max_node_memory_size = 0
+        new_max_running_max_memory_size = 0
+        new_max_node_memory_saved_by_view = 0
+        new_max_node_memory_saved_by_inplace = 0
+
+        def count_running_memory(order, thunk_old_storage, nodes_mem):
+            """
+            Calculate memory with specific node order 
+            Return a list including the following values
+            1.  node_memory_size
+                Sum of the size of all variables that actually allocate
+                memory (excluding views, and inplace);
+            2. running_memory_size
+                The memory allocated after the current apply node
+            3. running_max_memory_size
+                The maximum of running_memory_size during the function   
+            4.  node_memory_saved_by_view
+                The sum of memory saved by returning view instead of new
+                allocation 
+            5.  node_memory_saved_by_inplace
+                The sum of memory saved by reusing the input instead of
+                new allocation
+            
+            """
+            node_memory_size = 0
+            running_memory_size = 0
+            running_max_memory_size = 0
+            node_memory_saved_by_view = 0
+            node_memory_saved_by_inplace = 0
+            
             for node in order:
                 val = nodes_mem[node]
                 dmap = getattr(node.op, 'destroy_map', None)
@@ -665,21 +683,61 @@ class ProfileStats(object):
                         running_memory_size += v
                         if running_memory_size > running_max_memory_size:
                             running_max_memory_size = running_memory_size
-                        old_storage = post_thunk_old_storage[order.index(node)]
+                        old_storage = thunk_old_storage[order.index(node)]
                         for old_s in old_storage:
                             old_v = var_mem[node.inputs[old_s]]
                             if not isinstance(old_v, str):
                                 running_memory_size -= old_v
 
+            return [node_memory_size, running_memory_size, running_max_memory_size, node_memory_saved_by_inplace, node_memory_saved_by_view]
+
+        for fgraph, nodes_mem in fct_memory.iteritems():
+            # Sum of the size of all variables in bytes
+            sum_size = sum([sum([v for v in val if not isinstance(v, str)])
+                            for key, val in nodes_mem.iteritems()])    
+
+            order = fgraph.toposort()
+            # A list of intermediate variable that are not need
+            # after the execution of the corresponding node.
+            # It mean that after executing the node,
+            # the corresponding variable can be gc.
+            post_thunk_old_storage = []
+            computed, last_user = theano.gof.link.gc_helper(order)
+            for node in order:
+                post_thunk_old_storage.append([
+                    input_idx
+                    for input_idx, input in enumerate(node.inputs)
+                    if (input in computed) and
+                    (input not in fgraph.outputs) and
+                    node == last_user[input]])
+
+            old_running_memory = count_running_memory(order, post_thunk_old_storage, nodes_mem)
+
+            new_order = fgraph.profile.node_executed_order
+            # A list of new executed node order
+            new_storage = fgraph.profile.node_cleared_order
+            # A list of variables that get freed
+
+            new_running_memory = count_running_memory(new_order, new_storage, nodes_mem)
+
             # Store the max of some stats by any function in this profile.
             max_sum_size = max(max_sum_size, sum_size)
-            max_node_memory_size = max(max_node_memory_size, node_memory_size)
+            max_node_memory_size = max(max_node_memory_size, old_running_memory[0])
             max_running_max_memory_size = max(max_running_max_memory_size,
-                                          running_max_memory_size)
+                                          old_running_memory[2])
             max_node_memory_saved_by_view = max(max_node_memory_saved_by_view,
-                                                node_memory_saved_by_view)
+                                                old_running_memory[4])
             max_node_memory_saved_by_inplace = max(
-                max_node_memory_saved_by_inplace, node_memory_saved_by_inplace)
+                max_node_memory_saved_by_inplace, old_running_memory[3])
+
+            # Store max of some stats with new order
+            new_max_node_memory_size = max(new_max_node_memory_size, new_running_memory[0])
+            new_max_running_max_memory_size = max(new_max_running_max_memory_size,
+                                        new_running_memory[2])
+            new_max_node_memory_saved_by_view = max(new_max_node_memory_saved_by_view,
+                                                new_running_memory[4])
+            new_max_node_memory_saved_by_inplace = max(
+                new_max_node_memory_saved_by_inplace, new_running_memory[3])
 
             del fgraph, nodes_mem, post_thunk_old_storage, node
 
@@ -690,21 +748,27 @@ class ProfileStats(object):
             print >> file,  "Memory Profile"
 
         print >> file, "(Sparse variables are ignored)"
+        print >> file, "(For values in brackets, it's for linker = c|py"
 
         print >> file,  "---"
 #        print >> file,  "    Max if no gc, inplace and view: %dKB" % int(
 #            round(max_sum_size / 1024))
-        print >> file,  "    Max if linker=cvm (default): unknown"
-        print >> file,  "    Max if no gc (allow_gc=False): %dKB" % int(round(
-                             max_node_memory_size / 1024.))
-        print >> file,  "    Max if linker=c|py: %dKB" % int(round(
-            max_running_max_memory_size / 1024.))
-#        print >> file,  "    Memory saved if views are used: %dKB" % int(
-#            round(max_node_memory_saved_by_view / 1024.))
-#        print >> file,  "    Memory saved if inplace ops are used: %dKB" % \
-#            int(round(max_node_memory_saved_by_inplace / 1024.))
-        print >> file,  "    Memory saved if gc is enabled (linker=c|py): %dKB" % int(
-            round(max_node_memory_size - max_running_max_memory_size) / 1024.)
+
+        print >> file,  "    Max if no gc (allow_gc=False): %dKB (%dKB)" % (int(round(
+                             new_max_node_memory_size / 1024.)), int(round(
+                             max_node_memory_size / 1024.)))
+        print >> file,  "    Max if linker=cvm(default): %dKB (%dKB)" % (int(round(
+            new_max_running_max_memory_size / 1024.)), int(round(
+            max_running_max_memory_size / 1024.)))
+        print >> file,  "    Memory saved if views are used: %dKB (%dKB)" % (int(
+            round(new_max_node_memory_saved_by_view / 1024.)), int(
+            round(max_node_memory_saved_by_view / 1024.)))
+        print >> file,  "    Memory saved if inplace ops are used: %dKB (%dKB)" % \
+            (int(round(new_max_node_memory_saved_by_inplace / 1024.)), int(round(max_node_memory_saved_by_inplace / 1024.)))
+        print >> file,  "    Memory saved if gc is enabled: %dKB (%dKB)" % (int(
+            round(new_max_node_memory_size - new_max_running_max_memory_size) / 1024.), int(
+            round(max_node_memory_size - max_running_max_memory_size) / 1024.))
+
         if (hasattr(theano, 'sandbox') and
             hasattr(theano.sandbox, 'cuda') and
             hasattr(theano.sandbox.cuda, 'cuda_ndarray') and
@@ -787,8 +851,8 @@ class ProfileStats(object):
         if self.variable_shape or self.variable_strides:
             self.summary_memory(file, n_apply_to_print)
         if self.optimizer_profile:
-            print "Optimizer Profile"
-            print "-----------------"
+            print >> file, "Optimizer Profile"
+            print >> file, "-----------------"
             self.optimizer_profile[0].print_profile(file,
                                                     self.optimizer_profile[1])
 
@@ -882,9 +946,9 @@ if 0: # old code still to be ported from ProfileMode
         print 'Theano fct call %.3fs %.1f%%' % (total_fct_time,
                                                 total_fct_time / total_time *
                                                 100)
-        print '   Theano Op time (included in fct call, Time spent running thunks) %.3fs %.1f%%(of total) %.1f%%(of fct call)' % (local_time,
-                                                                                                                                  local_time / total_time * 100,
-                                                                                                                                  time_pr_in_fct)
+        print ('   Theano Op time (included in fct call, Time spent '
+               'running thunks) %.3fs %.1f%%(of total) %.1f%%(of fct call)' %
+               (local_time, local_time / total_time * 100, time_pr_in_fct))
         print 'Other time since import %.3fs %.1f%%'%(other_time,other_time/total_time*100)
         print '%i Theano fct call, %.3fs per call'%(total_fct_call, time_per_call)
 

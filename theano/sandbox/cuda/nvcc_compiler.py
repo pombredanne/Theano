@@ -16,7 +16,7 @@ from theano.gof.cmodule import (std_libs, std_lib_dirs,
                                 std_include_dirs, dlimport,
                                 get_lib_extension)
 from theano.gof.python25 import any
-from theano.misc.windows import call_subprocess_Popen
+from theano.misc.windows import output_subprocess_Popen
 
 _logger = logging.getLogger("theano.sandbox.cuda.nvcc_compiler")
 _logger.setLevel(logging.WARN)
@@ -98,12 +98,8 @@ nvcc_version = None
 def is_nvcc_available():
     """Return True iff the nvcc compiler is found."""
     def set_version():
-        p = call_subprocess_Popen([nvcc_path, '--version'],
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE)
-        p.wait()
-
-        ver_line = decode(p.stdout.readlines()[-1])
+        p_out = output_subprocess_Popen([nvcc_path, '--version'])
+        ver_line = decode(p_out[0]).strip().split('\n')[-1]
         build, version = ver_line.split(',')[1].strip().split()
 
         assert build == 'release'
@@ -133,8 +129,7 @@ def find_cuda_root():
         return
     for dir in s.split(os.path.pathsep):
         if os.path.exists(os.path.join(dir, "nvcc")):
-            config.cuda.root = os.path.split(dir)[0]
-            return
+            return os.path.split(dir)[0]
 
 rpath_defaults = []
 
@@ -160,6 +155,12 @@ class NVCC_compiler(object):
         cuda_ndarray_cuh_hash = hash_from_file(
             os.path.join(os.path.split(__file__)[0], 'cuda_ndarray.cuh'))
         flags.append('-DCUDA_NDARRAY_CUH=' + cuda_ndarray_cuh_hash)
+
+        # NumPy 1.7 Deprecate the old API. I updated most of the places
+        # to use the new API, but not everywhere. When finished, enable
+        # the following macro to assert that we don't bring new code
+        # that use the old API.
+        flags.append("-D NPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION")
 
         # numpy 1.7 deprecated the following macro but the didn't
         # existed in the past
@@ -259,20 +260,13 @@ class NVCC_compiler(object):
             libs.append('cudart')
 
         lib_dirs = std_lib_dirs() + lib_dirs
-        if cuda_root:
-            lib_dirs.append(os.path.join(cuda_root, 'lib'))
+        if any(ld == os.path.join(cuda_root, 'lib') or
+               ld == os.path.join(cuda_root, 'lib64') for ld in lib_dirs):
+            warnings.warn("You have the cuda library directory in your "
+                          "lib_dirs. This has been known to cause problems "
+                          "and should not be done.")
 
-            # from Benjamin Schrauwen April 14 2010
-            if sys.platform != 'darwin':
-                # No 64 bit CUDA libraries available on the mac, yet..
-                lib_dirs.append(os.path.join(cuda_root, 'lib64'))
-
-        if sys.platform == 'darwin':
-            # On the mac, nvcc is not able to link using -framework
-            # Python, so we have manually add the correct library and
-            # paths
-            darwin_python_lib = commands.getoutput('python-config --ldflags')
-        else:
+        if sys.platform != 'darwin':
             # sometimes, the linker cannot find -lpython so we need to tell it
             # explicitly where it is located
             # this returns somepath/lib/python2.x
@@ -299,7 +293,7 @@ class NVCC_compiler(object):
         #nvcc argument
         preargs1 = []
         for pa in preargs:
-            for pattern in ['-O', '-arch=',
+            for pattern in ['-O', '-arch=', '-ccbin=',
                             '--fmad', '--ftz', '--maxrregcount',
                             '--prec-div', '--prec-sqrt',  '--use_fast_math',
                             '-fmad', '-ftz', '-maxrregcount',
@@ -335,8 +329,7 @@ class NVCC_compiler(object):
 
             rpaths.append(os.path.join(config.cuda.root, 'lib'))
             if sys.platform != 'darwin':
-                # the 64bit CUDA libs are in the same files as are
-                # named by the function above
+                # the CUDA libs are universal (contain both 32-bit and 64-bit)
                 rpaths.append(os.path.join(config.cuda.root, 'lib64'))
         if sys.platform != 'win32':
             # the -rpath option is not understood by the Microsoft linker
@@ -348,19 +341,9 @@ class NVCC_compiler(object):
         cmd.extend(['-L%s' % ldir for ldir in lib_dirs])
         cmd.extend(['-l%s' % l for l in libs])
         if sys.platform == 'darwin':
-            cmd.extend(darwin_python_lib.split())
-
-        if sys.platform == 'darwin':
-            done = False
-            while not done:
-                try:
-                    indexof = cmd.index('-framework')
-                    newarg = '-Xcompiler', ','.join(cmd[indexof:(indexof + 2)])
-                    cmd.pop(indexof)  # Remove -framework
-                    cmd.pop(indexof)  # Remove argument to -framework
-                    cmd.extend(newarg)
-                except ValueError, e:
-                    done = True
+            # This tells the compiler to use the already-loaded python
+            # symbols (which should always be the right ones).
+            cmd.extend(['-Xcompiler', '-undefined,dynamic_lookup'])
 
         # Remove "-u Symbol" arguments, since they are usually not
         # relevant for the new compilation, even if they were used for
@@ -375,8 +358,6 @@ class NVCC_compiler(object):
             except ValueError, e:
                 done = True
 
-        # Fix for MacOS X.
-        cmd = remove_python_framework_dir(cmd)
         # CUDA Toolkit v4.1 Known Issues:
         # Host linker on Mac OS 10.7 (and 10.6 for me) passes -no_pie option
         # to nvcc this option is not recognized and generates an error
@@ -442,37 +423,3 @@ class NVCC_compiler(object):
             #touch the __init__ file
             open(os.path.join(location, "__init__.py"), 'w').close()
             return dlimport(lib_filename)
-
-
-def remove_python_framework_dir(cmd):
-    """
-    Search for Python framework directory and get rid of it.
-
-    :param cmd: A list of strings corresponding to compilation arguments. On
-    MacOS X, one of these strings may be of the form
-    "/opt/local/Library/Frameworks/Python.framework/Versions/2.7/Python"
-    and it needs to be removed as otherwise compilation will fail.
-
-    :return: The same list as `cmd`, but without the element of the form
-    mentioned above, if one exists.
-    """
-    # The fix below was initially suggested by Nicolas Pinto:
-    #   http://groups.google.com/group/theano-users/browse_thread/thread/c84bfe31bb411493
-    # It was improved later following a bug report by Benjamin Hamner:
-    #   https://groups.google.com/group/theano-users/browse_thread/thread/374ec2dadd3ac369/024e2be792f98d86
-    # It was modified by Graham Taylor to support Enthought Python Distribution
-    #     7.x (32 and 64 bit)
-    # TODO It is a bit hack-ish, is it possible to find a more generic fix?
-    fwk_pattern = '(Python|EPD64).framework/Versions/(2\.[0-9]|7\.[0-9])/Python$'
-    rval = [element for element in cmd
-            if (re.search(fwk_pattern, element) is None
-                # Keep this element if it turns out to be part of an argument
-                # like -L.
-                or element.startswith('-'))]
-    if len(rval) < len(cmd) - 1:
-        warnings.warn("'remove_python_framework_dir' removed %s elements from "
-                      "the command line, while it is expected to remove at "
-                      "most one. If compilation fails, this would be a good "
-                      "place to start looking for a problem." %
-                      (len(cmd) - len(rval)))
-    return rval

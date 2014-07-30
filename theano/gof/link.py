@@ -1,5 +1,5 @@
 """WRITEME"""
-from copy import copy
+from copy import copy, deepcopy
 import StringIO
 import sys
 import traceback
@@ -13,7 +13,7 @@ __excepthook = sys.excepthook
 
 
 def log_thunk_trace(value, f=sys.stderr):
-    """Log theano's diagnostic stack trace for an exception
+    """Log Theano's diagnostic stack trace for an exception
     raised by raise_with_op.
     """
     # in future, consider accepting `write` as arg rather than file
@@ -56,14 +56,14 @@ sys.excepthook = thunk_hook
 
 
 # TODO: Make this work with linker defined schedule
-def raise_with_op(op, thunk=None, exc_info=None):
+def raise_with_op(node, thunk=None, exc_info=None):
     """
     Re-raise an exception while annotating the exception object with
     debug info.
 
     Parameters
     ----------
-    op : Apply node
+    node : Apply node
         The Apply node object that resulted in the raised exception.
     exc_info : tuple, optional
         A tuple containing the exception type, exception object and
@@ -94,16 +94,16 @@ def raise_with_op(op, thunk=None, exc_info=None):
         # print a simple traceback from KeyboardInterrupt
         raise exc_type, exc_value, exc_trace
     try:
-        trace = op.tag.trace
+        trace = node.tag.trace
     except AttributeError:
         try:
-            trace = op.op.tag.trace
+            trace = node.op.tag.trace
         except AttributeError:
             trace = ()
     exc_value.__thunk_trace__ = trace
-    exc_value.__op_instance__ = op
-    if op in op.fgraph.toposort():
-        exc_value.__applynode_index__ = op.fgraph.toposort().index(op)
+    exc_value.__op_instance__ = node
+    if node in node.fgraph.toposort():
+        exc_value.__applynode_index__ = node.fgraph.toposort().index(node)
     else:
         exc_value.__applynode_index__ = None
 
@@ -112,7 +112,11 @@ def raise_with_op(op, thunk=None, exc_info=None):
     if raise_with_op.print_thunk_trace:
         log_thunk_trace(exc_value)
 
-    detailed_err_msg = "\nApply node that caused the error: " + str(op)
+    hints = []
+    detailed_err_msg = "\nApply node that caused the error: " + str(node)
+
+    types = [getattr(ipt, 'type', 'No type') for ipt in node.inputs]
+    detailed_err_msg += "\nInputs types: %s\n" % types
 
     if thunk is not None:
         if hasattr(thunk, 'inputs'):
@@ -120,29 +124,54 @@ def raise_with_op(op, thunk=None, exc_info=None):
                       for ipt in thunk.inputs]
             strides = [getattr(ipt[0], 'strides', 'No strides')
                        for ipt in thunk.inputs]
+            scalar_values = []
+            for ipt in thunk.inputs:
+                if getattr(ipt[0], "size", -1) == 1:
+                    scalar_values.append(ipt[0])
+                else:
+                    scalar_values.append("not scalar")
         else:
             shapes = "The thunk don't have an inputs attributes."
-            strides = "So we can't access the storage inputs value"
+            strides = "So we can't access the strides of inputs values"
+            scalar_values = "And can't print its inputs scalar value"
 
-        types = [getattr(ipt, 'type', 'No type')
-                 for ipt in op.inputs]
-        detailed_err_msg += ("\nInputs shapes: %s" % shapes +
+        detailed_err_msg += ("Inputs shapes: %s" % shapes +
                              "\nInputs strides: %s" % strides +
-                             "\nInputs types: %s" % types)
+                             "\nInputs scalar values: %s\n" % scalar_values)
     else:
-        detailed_err_msg += ("\nUse another linker then the c linker to"
-                             " have the inputs shapes and strides printed.")
+        hints.append(
+            "HINT: Use another linker then the c linker to"
+            " have the inputs shapes and strides printed.")
+
+    # Print node backtrace
+    tr = getattr(node.tag, 'trace', None)
+    if tr:
+        sio = StringIO.StringIO()
+        traceback.print_list(tr, sio)
+        tr = sio.getvalue()
+        detailed_err_msg += "\nBacktrace when the node is created:\n"
+        detailed_err_msg += str(tr)
+    else:
+        hints.append(
+            "HINT: Re-running with most Theano optimization disabled could"
+            " give you a back-traces when this node was created. This can"
+            " be done with by setting the Theano flags"
+            " optimizer=fast_compile")
 
     if theano.config.exception_verbosity == 'high':
         f = StringIO.StringIO()
-        theano.printing.debugprint(op, file=f, stop_on_name=True,
+        theano.printing.debugprint(node, file=f, stop_on_name=True,
                                    print_type=True)
-        detailed_err_msg += "\nDebugprint of the apply node: \n" + f.getvalue()
-    else:
-        detailed_err_msg += ("\nUse the Theano flag 'exception_verbosity=high'"
-                             " for a debugprint of this apply node.")
+        detailed_err_msg += "\nDebugprint of the apply node: \n"
+        detailed_err_msg += f.getvalue()
 
-    exc_value = exc_type(str(exc_value) + detailed_err_msg)
+    else:
+        hints.append(
+            "HINT: Use the Theano flag 'exception_verbosity=high'"
+            " for a debugprint of this apply node.")
+
+    exc_value = exc_type(str(exc_value) + detailed_err_msg +
+                         '\n' + '\n'.join(hints))
     raise exc_type, exc_value, exc_trace
 
 raise_with_op.print_thunk_trace = False
@@ -229,7 +258,7 @@ class Container(object):
         """WRITEME
 
         :Parameters:
-         `r`: a variable
+         `r`: a Variable or a Type
          `storage`: a list of length 1, whose element is the value for `r`
          `readonly`: True indicates that this should not be setable by Function[r] = val
          `strict`: if True, we don't allow type casting.
@@ -248,6 +277,8 @@ class Container(object):
             self.type = r.type
         if name is None:
             self.name = r.name
+        else:
+            self.name = name
 
         self.storage = storage
         self.readonly = readonly
@@ -288,6 +319,30 @@ class Container(object):
 
     def __repr__(self):
         return "<" + repr(self.storage[0]) + ">"
+
+    def __deepcopy__(self, memo):
+        data_was_in_memo = id(self.storage[0]) in memo
+        r = type(self)(
+            deepcopy(self.type, memo=memo),
+            deepcopy(self.storage, memo=memo),
+            deepcopy(self.readonly, memo=memo),
+            deepcopy(self.strict, memo=memo),
+            deepcopy(self.allow_downcast, memo=memo),
+            deepcopy(self.name, memo=memo),
+            )
+        # Work around NumPy deepcopy of ndarray with 0 dimention that
+        # don't return an ndarray.
+        if (r.storage[0] is not None and
+            not self.type.is_valid_value(r.storage[0])):
+
+            assert not data_was_in_memo
+            assert self.type.is_valid_value(self.storage[0])
+            # This should also work for read only container.
+            r.storage[0] = self.type.filter(r.storage[0],
+                                            strict=False,
+                                            allow_downcast=False)
+            memo[id(self.storage[0])] = r.storage[0]
+        return r
 
 
 def map_storage(fgraph, order, input_storage, output_storage):

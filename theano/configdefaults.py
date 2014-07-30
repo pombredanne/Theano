@@ -117,40 +117,11 @@ AddConfigVar('mode',
 enum = EnumStr("g++", "")
 
 # Test whether or not g++ is present: disable C code if it is not.
-# Using the dummy file descriptor below is a workaround for a crash experienced
-# in an unusual Python 2.4.4 Windows environment with the default stdin=None.
-dummy_stdin = open(os.devnull)
 try:
-    try:
-        rc = call_subprocess_Popen(['g++', '-v'], stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE,
-                                   stdin=dummy_stdin).wait()
-    except OSError:
-        rc = 1
-finally:
-    dummy_stdin.close()
-    del dummy_stdin
-if rc == 0:
-    # Keep the default linker the same as the one for the mode FAST_RUN
-    AddConfigVar('linker',
-                 ("Default linker used if the theano flags mode is Mode "
-                  "or ProfileMode"),
-                 EnumStr('cvm', 'c|py', 'py', 'c', 'c|py_nogc', 'c&py',
-                     'vm', 'vm_nogc', 'cvm_nogc'),
-                 in_c_key=False)
-else:
-    # g++ is not present, linker should default to python only
-    AddConfigVar('linker',
-                 ("Default linker used if the theano flags mode is Mode "
-                  "or ProfileMode"),
-                 EnumStr('py', 'vm', 'vm_nogc'),
-                 in_c_key=False)
-    _logger.warning('g++ not detected ! Theano will be unable to execute '
-            'optimized C-implementations (for both CPU and GPU) and will '
-            'default to Python implementations. Performance will be severely '
-            'degraded.')
+    rc = call_subprocess_Popen(['g++', '-v'])
+except OSError:
     enum = EnumStr("")
-
+    rc = 1
 AddConfigVar('cxx',
              "The C++ compiler to use. Currently only g++ is"
              " supported, but supporting additional compilers should not be "
@@ -159,6 +130,26 @@ AddConfigVar('cxx',
              enum,
              in_c_key=False)
 del enum
+
+if rc == 0 and config.cxx != "":
+    # Keep the default linker the same as the one for the mode FAST_RUN
+    AddConfigVar('linker',
+                 ("Default linker used if the theano flags mode is Mode "
+                  "or ProfileMode(deprecated)"),
+                 EnumStr('cvm', 'c|py', 'py', 'c', 'c|py_nogc', 'c&py',
+                     'vm', 'vm_nogc', 'cvm_nogc'),
+                 in_c_key=False)
+else:
+    # g++ is not present, linker should default to python only
+    AddConfigVar('linker',
+                 ("Default linker used if the theano flags mode is Mode "
+                  "or ProfileMode(deprecated)"),
+                 EnumStr('py', 'vm', 'vm_nogc'),
+                 in_c_key=False)
+    _logger.warning('g++ not detected ! Theano will be unable to execute '
+            'optimized C-implementations (for both CPU and GPU) and will '
+            'default to Python implementations. Performance will be severely '
+            'degraded.')
 
 
 #Keep the default value the same as the one for the mode FAST_RUN
@@ -174,7 +165,7 @@ AddConfigVar('allow_gc',
 #Keep the default optimizer the same as the one for the mode FAST_RUN
 AddConfigVar('optimizer',
         ("Default optimizer. If not None, will use this linker with the Mode "
-         "object (not ProfileMode or DebugMode)"),
+         "object (not ProfileMode(deprecated) or DebugMode)"),
         EnumStr('fast_run', 'merge', 'fast_compile', 'None'),
         in_c_key=False)
 
@@ -259,12 +250,27 @@ AddConfigVar('gpuelemwise.sync',
 
 AddConfigVar('traceback.limit',
              "The number of stack to trace. -1 mean all.",
-             IntParam(5),
+# We default to 6 to be able to know where v1 + v2 is created in the
+# user script. The bigger this number is, the more run time it takes.
+             IntParam(6),
              in_c_key=False)
 
 AddConfigVar('experimental.mrg',
              "Another random number generator that work on the gpu",
              BoolParam(False))
+
+AddConfigVar('experimental.unpickle_gpu_on_cpu',
+             "Allow unpickling of pickled CudaNdarrays as numpy.ndarrays."
+             "This is useful, if you want to open a CudaNdarray without "
+             "having cuda installed."
+             "If you have cuda installed, this will force unpickling to"
+             "be done on the cpu to numpy.ndarray."
+             "Please be aware that this may get you access to the data,"
+             "however, trying to unpicke gpu functions will not succeed."
+             "This flag is experimental and may be removed any time, when"
+             "gpu<>cpu transparency is solved.",
+             BoolParam(default=False),
+             in_c_key=False)
 
 AddConfigVar('numpy.seterr_all',
              ("Sets numpy's behaviour for floating-point errors, ",
@@ -394,6 +400,12 @@ AddConfigVar('warn.vm_gc_bug',
         BoolParam(False),
         in_c_key=False)
 
+AddConfigVar('warn.signal_conv2d_interface',
+             ("Warn we use the new signal.conv2d() when its interface"
+              " changed mid June 2014"),
+             BoolParam(warn_default('0.7')),
+             in_c_key=False)
+
 AddConfigVar('compute_test_value',
         ("If 'True', Theano will run each op at graph build time, using "
          "Constants, SharedVariables and the tag 'test_value' as inputs "
@@ -408,6 +420,13 @@ AddConfigVar('compute_test_value_opt',
               " Same as compute_test_value, but is used"
               " during Theano optimization"),
              EnumStr('off', 'ignore', 'warn', 'raise', 'pdb'),
+             in_c_key=False)
+
+AddConfigVar('unpickle_function',
+             ("Replace unpickled Theano functions with None. "
+              "This is useful to unpickle old graphs that pickled"
+              " them when it shouldn't"),
+             BoolParam(True),
              in_c_key=False)
 
 """Note to developers:
@@ -468,3 +487,18 @@ AddConfigVar('openmp',
              BoolParam(default_openmp),
              in_c_key=False,
          )
+
+AddConfigVar('openmp_elemwise_minsize',
+             "If OpenMP is enabled, this is the minimum size of vectors "
+             "for which the openmp parallelization is enabled "
+             "in element wise ops.",
+             IntParam(200000),
+             in_c_key=False,
+         )
+
+AddConfigVar('check_input',
+             "Specify if types should check their input in their C code. "
+             "It can be used to speed up compilation, reduce overhead"
+              "(particularly for scalars) and reduce the number of generated C"
+              "files.",
+             BoolParam(True))

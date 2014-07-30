@@ -100,15 +100,33 @@ class GpuArrayType(Type):
         return numpy.asarray(compare(a, '==', b)).all()
 
     @staticmethod
-    def values_eq_approx(a, b):
+    def values_eq_approx(a, b,
+                         allow_remove_inf=False, allow_remove_nan=False,
+                         rtol=None, atol=None):
         if a.shape != b.shape or a.dtype != b.dtype:
             return False
         if 'int' in str(a.dtype):
             return GpuArrayType.values_eq(a, b)
         else:
+            if allow_remove_inf or allow_remove_nan:
+                raise NotImplementedError(
+                    "GpuArrayType.values_eq_approx() don't implemented the"
+                    " allow_remove_inf and allow_remove_nan parameter")
+            narrow = 'float32', 'complex64'
+            if (str(a.dtype) in narrow) or (str(b.dtype) in narrow):
+                atol_ = theano.tensor.basic.float32_atol
+                rtol_ = theano.tensor.basic.float32_rtol
+            else:
+                atol_ = theano.tensor.basic.float64_atol
+                rtol_ = theano.tensor.basic.float64_rtol
+            if rtol is not None:
+                rtol_ = rtol
+            if atol is not None:
+                atol_ = atol
             res = elemwise2(a, '', b, a, odtype=numpy.dtype('bool'),
-                            op_tmpl="res[i] = ((%(a)s - %(b)s) <"
-                            "(1e-8 + 1e-5 * fabs(%(b)s)))")
+                            op_tmpl="res[i] = (fabs(%%(a)s - %%(b)s) <"
+                            "(%(atol_)s + %(rtol_)s * fabs(%%(b)s)))" %
+                            locals())
             return numpy.asarray(res).all()
 
     def value_zeros(self, shape):
@@ -128,6 +146,33 @@ class GpuArrayType(Type):
     def __str__(self):
         return "GpuArray<%s>" % (self.dtype,)
 
+    def dtype_specs(self):
+        """Return a tuple (python type, c type, numpy typenum) that corresponds
+        to self.dtype.
+
+        This function is used internally as part of C code generation.
+        """
+        # TODO: add more type correspondances for e.g. int32, int64, float32,
+        # complex64, etc.
+        try:
+            return {
+                'float32': (float, 'npy_float32', 'NPY_FLOAT32'),
+                'float64': (float, 'npy_float64', 'NPY_FLOAT64'),
+                'uint8': (int, 'npy_uint8', 'NPY_UINT8'),
+                'int8': (int, 'npy_int8', 'NPY_INT8'),
+                'uint16': (int, 'npy_uint16', 'NPY_UINT16'),
+                'int16': (int, 'npy_int16', 'NPY_INT16'),
+                'uint32': (int, 'npy_uint32', 'NPY_UINT32'),
+                'int32': (int, 'npy_int32', 'NPY_INT32'),
+                'uint64': (int, 'npy_uint64', 'NPY_UINT64'),
+                'int64': (int, 'npy_int64', 'NPY_INT64'),
+                'complex128': (complex, 'theano_complex128', 'NPY_COMPLEX128'),
+                'complex64': (complex, 'theano_complex64', 'NPY_COMPLEX64')
+                }[self.dtype]
+        except KeyError:
+            raise TypeError("Unsupported dtype for %s: %s" %
+                            (self.__class__.__name__, self.dtype))
+
     def get_shape_info(self, obj):
         return obj.shape
 
@@ -137,13 +182,15 @@ class GpuArrayType(Type):
         else:
             return numpy.dtype(self.dtype).itemsize
 
-    def c_declare(self, name, sub):
-        return "PyGpuArrayObject *%s;" % (name,)
+    def c_declare(self, name, sub, check_input=True):
+        return """
+        PyGpuArrayObject *%(name)s;
+        """ % locals()
 
     def c_init(self, name, sub):
         return "%s = NULL;" % (name,)
 
-    def c_extract(self, name, sub):
+    def c_extract(self, name, sub, check_input=True):
         # TODO I don't check broadcast stuff for now.
         return """
         %(name)s = NULL;
@@ -187,15 +234,15 @@ class GpuArrayType(Type):
     def c_headers(self):
         # We need arrayobject for the PyArrayDescr struct def
         # (even if we just use a pointer to it in a function def)
-        return ['<compyte/array.h>', '<compyte/kernel.h>', '<compyte/error.h>',
-                '<compyte/buffer_blas.h>', '<numpy/arrayobject.h>',
+        return ['<gpuarray/array.h>', '<gpuarray/kernel.h>', '<gpuarray/error.h>',
+                '<gpuarray/buffer_blas.h>', '<numpy/arrayobject.h>',
                 '<gpuarray_api.h>']
 
     def c_header_dirs(self):
         return [pygpu.get_include(), numpy.get_include()]
 
     def c_libraries(self):
-        return ['compyte']
+        return ['gpuarray']
 
     def c_code_cache_version(self):
         ver = pygpu.gpuarray.api_version()
@@ -278,8 +325,85 @@ theano.compile.register_view_op_c_code(GpuArrayType, """
     Py_XINCREF(%(oname)s);
 """, version=(0,))
 
+# Register GpuArrayType C code for Shape Op.
+theano.compile.register_shape_c_code(
+    GpuArrayType,
+    """
+    npy_intp shape[] = {%(iname)s->ga.nd};
+    if(%(oname)s == NULL || (PyArray_DIMS(%(oname)s)[0] != shape[0]))
+    {
+        Py_XDECREF(%(oname)s);
+        %(oname)s = (PyArrayObject*) PyArray_SimpleNew(1, shape, NPY_INT64);
+    }
+    for(int i=0;i<shape[0];i++)
+    {
+        ((npy_int64*)PyArray_GETPTR1(%(oname)s, i))[0] = %(iname)s->ga.dimensions[i];
+    }
+    """,
+    version=1)
+
+theano.compile.register_shape_i_c_code(
+    GpuArrayType,
+    """
+    if(!%(oname)s)
+        %(oname)s=(PyArrayObject*)PyArray_ZEROS(0, NULL, NPY_INT64, 0);
+    ((npy_int64*)PyArray_DATA(%(oname)s))[0] =
+                              %(iname)s->ga.dimensions[%(i)s];
+    """,
+    """
+    if (%(i)s>=%(iname)s->ga.nd){
+        PyErr_SetString(PyExc_TypeError,
+            "Number of dimensions lower than expected");
+        %(fail)s
+    }
+    """,
+    version=(1,))
+
 theano.compile.register_deep_copy_op_c_code(GpuArrayType, """
     Py_XDECREF(%(oname)s);
     %(oname)s = pygpu_copy(%(iname)s, GA_ANY_ORDER);
     if (!%(oname)s) { %(fail)s }
 """, version=(5,))
+
+theano.compile.register_rebroadcast_c_code(
+    GpuArrayType,
+    """
+    if(%(iname)s->ga.dimensions[%(axis)s] != 1){
+        PyErr_Format(PyExc_ValueError,
+            "Dimension %(axis)s in Rebroadcast's input was"
+            " supposed to be 1 (got %%d instead)",
+            %(iname)s->ga.dimensions[%(axis)s]);
+        %(fail)s
+    }
+    """,
+    version=1)
+
+theano.compile.register_specify_shape_c_code(
+    GpuArrayType,
+    """
+        if (PyGpuArray_NDIM(%(iname)s) != PyArray_DIMS(%(shape)s)[0]) {
+            PyErr_Format(PyExc_AssertionError,
+                         "SpecifyShape: vector of shape has %%d elements,"
+                         " but the input has %%d dimensions.",
+                         PyGpuArray_NDIM(%(iname)s),
+                         PyArray_DIMS(%(shape)s)[0]);
+            %(fail)s;
+        }
+        for(int i = 0; i < PyGpuArray_NDIM(%(iname)s); i++){
+            dtype_%(shape)s shp = ((dtype_%(shape)s*)PyArray_GETPTR1(%(shape)s,
+                                                                     i))[0];
+            if (PyGpuArray_DIMS(%(iname)s)[i] != shp) {
+                PyErr_Format(PyExc_AssertionError,
+                             "SpecifyShape: dim %%d of input has shape %%d,"
+                             " expected %%d.",
+                             i, PyGpuArray_DIMS(%(iname)s)[i],
+                             shp);
+                %(fail)s;
+            }
+        }
+        Py_XDECREF(%(oname)s);
+        %(oname)s = %(iname)s;
+        Py_XINCREF(%(oname)s);
+    """,
+    version=1,
+    c_support_code_apply='#include <numpy_compat.h>')
