@@ -3,52 +3,81 @@
 
 import atexit
 import os
-import random
 import socket  # only used for gethostname()
 import time
 import logging
 
+from contextlib import contextmanager
+
+import numpy as np
+
 from theano import config
+from theano.configparser import AddConfigVar, IntParam
+
+random = np.random.RandomState([2015, 8, 2])
 
 _logger = logging.getLogger("theano.gof.compilelock")
-# INFO will show the the messages "Refreshing lock" message
-_logger.setLevel(logging.INFO)
+# If the user provided a logging level, we don't want to override it.
+if _logger.level == logging.NOTSET:
+    # INFO will show the "Refreshing lock" messages
+    _logger.setLevel(logging.INFO)
 
-# In seconds, time that a process will wait before deciding to override an
-# existing lock. An override only happens when the existing lock is held by
-# the same owner *and* has not been 'refreshed' by this owner for more than
-# 'timeout_before_override' seconds.
-timeout_before_override = 120
+AddConfigVar('compile.wait',
+             """Time to wait before retrying to aquire the compile lock.""",
+             IntParam(5, lambda i: i > 0, allow_override=False),
+             in_c_key=False)
 
-# In seconds, duration before a lock is refreshed. More precisely, the lock is
-# refreshed each time 'get_lock()' is called (typically for each file being
-# compiled) and the existing lock has not been refreshed in the past
-# 'refresh_every' seconds.
-refresh_every = 60
+
+def _timeout_default():
+    return config.compile.wait * 24
+
+AddConfigVar('compile.timeout',
+             """In seconds, time that a process will wait before deciding to
+override an existing lock. An override only happens when the existing
+lock is held by the same owner *and* has not been 'refreshed' by this
+owner for more than this period. Refreshes are done every half timeout
+period for running processes.""",
+             IntParam(_timeout_default, lambda i: i >= 0,
+                      allow_override=False),
+             in_c_key=False)
+
+hostname = socket.gethostname()
 
 
 def force_unlock():
     """
     Delete the compilation lock if someone else has it.
+
     """
-    global timeout_before_override
-    timeout_backup = timeout_before_override
-    timeout_before_override = 0
-    try:
-        get_lock(min_wait=0, max_wait=0.001)
+    get_lock(min_wait=0, max_wait=0.001, timeout=0)
+    release_lock()
+
+
+@contextmanager
+def lock_ctx(lock_dir=None, keep_lock=False, **kw):
+    get_lock(lock_dir=lock_dir, **kw)
+    yield
+    if not keep_lock:
         release_lock()
-    finally:
-        timeout_before_override = timeout_backup
 
 
-def get_lock(lock_dir=None, **kw):
+# We define this name with an underscore so that python shutdown
+# deletes this before non-underscore names (like os).  We need to do
+# it this way to avoid errors on shutdown.
+def _get_lock(lock_dir=None, **kw):
     """
     Obtain lock on compilation directory.
 
-    :param kw: Additional arguments to be forwarded to the `lock` function when
-    acquiring the lock.
+    Parameters
+    ----------
+    kw
+        Additional arguments to be forwarded to the `lock` function when
+        acquiring the lock.
 
-    :note: We can lock only on 1 directory at a time.
+    Notes
+    -----
+    We can lock only on 1 directory at a time.
+
     """
     if lock_dir is None:
         lock_dir = os.path.join(config.compiledir, 'lock_dir')
@@ -72,16 +101,24 @@ def get_lock(lock_dir=None, **kw):
     if get_lock.lock_is_enabled:
         # Only really try to acquire the lock if we do not have it already.
         if get_lock.n_lock == 0:
-            lock(get_lock.lock_dir, timeout=timeout_before_override, **kw)
+            lock(get_lock.lock_dir, **kw)
             atexit.register(Unlocker.unlock, get_lock.unlocker)
             # Store time at which the lock was set.
             get_lock.start_time = time.time()
         else:
-            # Check whether we need to 'refresh' the lock. We do this every
-            # 'refresh_every' seconds to ensure noone else tries to override
-            # our lock after their 'timeout_before_override' timeout period.
+            # Check whether we need to 'refresh' the lock. We do this
+            # every 'config.compile.timeout / 2' seconds to ensure
+            # no one else tries to override our lock after their
+            # 'config.compile.timeout' timeout period.
+            if get_lock.start_time is None:
+                # This should not happen. So if this happen, clean up
+                # the lock state and raise an error.
+                while get_lock.n_lock > 0:
+                    release_lock()
+                raise Exception("For some unknow reason, the lock was already "
+                                "taken, but no start time was registered.")
             now = time.time()
-            if now - get_lock.start_time > refresh_every:
+            if now - get_lock.start_time > config.compile.timeout / 2:
                 lockpath = os.path.join(get_lock.lock_dir, 'lock')
                 _logger.info('Refreshing lock %s', str(lockpath))
                 refresh_lock(lockpath)
@@ -89,16 +126,20 @@ def get_lock(lock_dir=None, **kw):
     get_lock.n_lock += 1
 
 
+get_lock = _get_lock
+
+
 def release_lock():
     """
     Release lock on compilation directory.
+
     """
     get_lock.n_lock -= 1
     assert get_lock.n_lock >= 0
     # Only really release lock once all lock requests have ended.
     if get_lock.lock_is_enabled and get_lock.n_lock == 0:
         get_lock.start_time = None
-        get_lock.unlocker.unlock()
+        get_lock.unlocker.unlock(force=False)
 
 
 def set_lock_status(use_lock):
@@ -107,46 +148,61 @@ def set_lock_status(use_lock):
     by default). Disabling may make compilation slightly faster (but is not
     recommended for parallel execution).
 
-    @param use_lock: whether to use the compilation lock or not
-    @type  use_lock: bool
+    Parameters
+    ----------
+    use_lock : bool
+        Whether to use the compilation lock or not.
+
     """
     get_lock.lock_is_enabled = use_lock
 
+# This is because None is a valid input for timeout
+notset = object()
 
-def lock(tmp_dir, timeout=120, min_wait=5, max_wait=10, verbosity=1):
+
+def lock(tmp_dir, timeout=notset, min_wait=None, max_wait=None, verbosity=1):
     """
     Obtain lock access by creating a given temporary directory (whose base will
     be created if needed, but will not be deleted after the lock is removed).
     If access is refused by the same lock owner during more than 'timeout'
     seconds, then the current lock is overridden. If timeout is None, then no
     timeout is performed.
+
     The lock is performed by creating a 'lock' file in 'tmp_dir' that contains
     a unique id identifying the owner of the lock (the process id, followed by
     a random string).
+
     When there is already a lock, the process sleeps for a random amount of
     time between min_wait and max_wait seconds before trying again.
+
     If 'verbosity' is >= 1, then a message will be displayed when we need to
     wait for the lock. If it is set to a value >1, then this message will be
     displayed each time we re-check for the presence of the lock. Otherwise it
     is displayed only when we notice the lock's owner has changed.
 
-    @param tmp_dir: lock directory that will be created when acquiring the lock
-    @type  tmp_dir: string
+    Parameters
+    ----------
+    tmp_dir : str
+        Lock directory that will be created when acquiring the lock.
+    timeout : int or None
+        Time (in seconds) to wait before replacing an existing lock (default
+        config 'compile.timeout').
+    min_wait: int
+        Minimum time (in seconds) to wait before trying again to get the lock
+        (default config 'compile.wait').
+    max_wait: int
+        Maximum time (in seconds) to wait before trying again to get the lock
+        (default 2 * min_wait).
+    verbosity : int
+        Amount of feedback displayed to screen (default 1).
 
-    @param timeout: time (in seconds) to wait before replacing an existing lock
-    @type  timeout: int or None
-
-    @param min_wait: minimum time (in seconds) to wait before trying again to
-                     get the lock
-    @type  min_wait: int
-
-    @param max_wait: maximum time (in seconds) to wait before trying again to
-                     get the lock
-    @type  max_wait: int
-
-    @param verbosity: amount of feedback displayed to screen
-    @type  verbosity: int
     """
+    if min_wait is None:
+        min_wait = config.compile.wait
+    if max_wait is None:
+        max_wait = min_wait * 2
+    if timeout is notset:
+        timeout = config.compile.timeout
     # Create base of lock directory if required.
     base_lock = os.path.dirname(tmp_dir)
     if not os.path.isdir(base_lock):
@@ -161,7 +217,6 @@ def lock(tmp_dir, timeout=120, min_wait=5, max_wait=10, verbosity=1):
 
     # Variable initialization.
     lock_file = os.path.join(tmp_dir, 'lock')
-    random.seed()
     my_pid = os.getpid()
     no_display = (verbosity == 0)
 
@@ -178,20 +233,23 @@ def lock(tmp_dir, timeout=120, min_wait=5, max_wait=10, verbosity=1):
             other_dead = False
             while os.path.isdir(tmp_dir):
                 try:
-                    read_owner = open(lock_file).readlines()[0].strip()
-                    # the try is transtion code for old locks
-                    # it may be removed when poeple have upgraded
+                    with open(lock_file) as f:
+                        read_owner = f.readlines()[0].strip()
+
+                    # The try is transition code for old locks.
+                    # It may be removed when people have upgraded.
                     try:
                         other_host = read_owner.split('_')[2]
                     except IndexError:
-                        other_host = () # make sure it isn't equal to any host
-                    if other_host == socket.gethostname():
+                        other_host = ()  # make sure it isn't equal to any host
+                    if other_host == hostname:
                         try:
+                            # Just check if the other process still exist.
                             os.kill(int(read_owner.split('_')[0]), 0)
                         except OSError:
                             other_dead = True
                         except AttributeError:
-                            pass #os.kill does not exist on windows
+                            pass  # os.kill does not exist on windows
                 except Exception:
                     read_owner = 'failure'
                 if other_dead:
@@ -199,7 +257,7 @@ def lock(tmp_dir, timeout=120, min_wait=5, max_wait=10, verbosity=1):
                         msg = "process '%s'" % read_owner.split('_')[0]
                         _logger.warning("Overriding existing lock by dead %s "
                                         "(I am process '%s')", msg, my_pid)
-                    get_lock.unlocker.unlock()
+                    get_lock.unlocker.unlock(force=True)
                     continue
                 if last_owner == read_owner:
                     if (timeout is not None and
@@ -212,7 +270,7 @@ def lock(tmp_dir, timeout=120, min_wait=5, max_wait=10, verbosity=1):
                                 msg = "process '%s'" % read_owner.split('_')[0]
                             _logger.warning("Overriding existing lock by %s "
                                             "(I am process '%s')", msg, my_pid)
-                        get_lock.unlocker.unlock()
+                        get_lock.unlocker.unlock(force=True)
                         continue
                 else:
                     last_owner = read_owner
@@ -250,7 +308,9 @@ def lock(tmp_dir, timeout=120, min_wait=5, max_wait=10, verbosity=1):
 
             # Verify we are really the lock owner (this should not be needed,
             # but better be safe than sorry).
-            owner = open(lock_file).readlines()[0].strip()
+            with open(lock_file) as f:
+                owner = f.readlines()[0].strip()
+
             if owner != unique_id:
                 # Too bad, try again.
                 continue
@@ -258,7 +318,7 @@ def lock(tmp_dir, timeout=120, min_wait=5, max_wait=10, verbosity=1):
                 # We got the lock, hoorray!
                 return
 
-        except Exception, e:
+        except Exception as e:
             # If something wrong happened, we try again.
             _logger.warning("Something wrong happened: %s %s", type(e), e)
             nb_error += 1
@@ -272,14 +332,26 @@ def refresh_lock(lock_file):
     """
     'Refresh' an existing lock by re-writing the file containing the owner's
     unique id, using a new (randomly generated) id, which is also returned.
+
     """
     unique_id = '%s_%s_%s' % (
         os.getpid(),
         ''.join([str(random.randint(0, 9)) for i in range(10)]),
-        socket.gethostname())
-    lock_write = open(lock_file, 'w')
-    lock_write.write(unique_id + '\n')
-    lock_write.close()
+        hostname)
+    try:
+        lock_write = open(lock_file, 'w')
+        lock_write.write(unique_id + '\n')
+        lock_write.close()
+    except Exception:
+        # In some strange case, this happen.  To prevent all tests
+        # from failing, we release the lock, but as there is a
+        # problem, we still keep the original exception.
+        # This way, only 1 test would fail.
+        while get_lock.n_lock > 0:
+            release_lock()
+        _logger.warn('Refreshing lock failed, we release the'
+                     ' lock before raising again the exception')
+        raise
     return unique_id
 
 
@@ -288,19 +360,15 @@ class Unlocker(object):
     Class wrapper around release mechanism so that the lock is automatically
     released when the program exits (even when crashing or being interrupted),
     using the __del__ class method.
+
     """
 
     def __init__(self, tmp_dir):
         self.tmp_dir = tmp_dir
-        # Keep a pointer to the 'os' module, otherwise it may not be accessible
-        # anymore in the __del__ method.
-        self.os = os
 
-    def __del__(self):
-        self.unlock()
-
-    def unlock(self):
-        """Remove current lock.
+    def unlock(self, force=False):
+        """
+        Remove current lock.
 
         This function does not crash if it is unable to properly
         delete the lock file and directory. The reason is that it
@@ -315,11 +383,24 @@ class Unlocker(object):
         # the same try/except block. The reason is that while the attempt to
         # remove the file may fail (e.g. because for some reason this file does
         # not exist), we still want to try and remove the directory.
+
+        # Check if someone else didn't took our lock.
+        lock_file = os.path.join(self.tmp_dir, 'lock')
+        if not force:
+            try:
+                with open(lock_file) as f:
+                    owner = f.readlines()[0].strip()
+                    pid, _, hname = owner.split('_')
+                    if pid != str(os.getpid()) or hname != hostname:
+                        return
+            except Exception:
+                pass
+
         try:
-            self.os.remove(self.os.path.join(self.tmp_dir, 'lock'))
+            os.remove(lock_file)
         except Exception:
             pass
         try:
-            self.os.rmdir(self.tmp_dir)
+            os.rmdir(self.tmp_dir)
         except Exception:
             pass

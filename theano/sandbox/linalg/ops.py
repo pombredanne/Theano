@@ -3,6 +3,9 @@ import logging
 logger = logging.getLogger(__name__)
 import numpy
 
+from six import iteritems
+from six.moves import xrange
+
 from theano.gof import Op, Apply
 
 from theano.tensor import as_tensor_variable, dot, DimShuffle, Dot
@@ -61,7 +64,7 @@ except ImportError:
 
 class Hint(Op):
     """
-    Provide arbitrary information to the optimizer
+    Provide arbitrary information to the optimizer.
 
     These ops are removed from the graph during canonicalization
     in order to not interfere with other optimizations.
@@ -70,15 +73,12 @@ class Hint(Op):
     transfer that information out of the graph.
 
     """
+
+    __props__ = ('hints',)
+
     def __init__(self, **kwargs):
         self.hints = tuple(kwargs.items())
         self.view_map = {0: [0]}
-
-    def __eq__(self, other):
-        return type(self) == type(other) and self.hints == other.hints
-
-    def __hash__(self):
-        return hash((type(self), self.hints))
 
     def make_node(self, x):
         return Apply(self, [x], [x.type()])
@@ -122,7 +122,7 @@ def remove_hint_nodes(node):
 
 class HintsFeature(object):
     """
-    FunctionGraph Feature to track matrix properties
+    FunctionGraph Feature to track matrix properties.
 
     This is a similar feature to variable 'tags'. In fact, tags are one way
     to provide hints.
@@ -189,7 +189,7 @@ class HintsFeature(object):
     def update_second_from_first(self, r0, r1):
         old_hints = self.hints[r0]
         new_hints = self.hints[r1]
-        for k, v in old_hints.items():
+        for k, v in iteritems(old_hints):
             if k in new_hints and new_hints[k] is not v:
                 raise NotImplementedError()
             if k not in new_hints:
@@ -209,8 +209,12 @@ class HintsFeature(object):
 
 
 class HintsOptimizer(Optimizer):
-    """Optimizer that serves to add HintsFeature as an fgraph feature.
     """
+    Optimizer that serves to add HintsFeature as an fgraph feature.
+    
+
+    """
+
     def __init__(self):
         Optimizer.__init__(self)
 
@@ -231,6 +235,7 @@ def psd(v):
     """
     Apply a hint that the variable `v` is positive semi-definite, i.e.
     it is a symmetric matrix and :math:`x^T A x \ge 0` for any vector x.
+
     """
     return Hint(psd=True, symmetric=True)(v)
 
@@ -246,7 +251,7 @@ def is_symmetric(v):
 def is_positive(v):
     if hints(v).get('positive', False):
         return True
-    #TODO: how to handle this - a registry?
+    # TODO: how to handle this - a registry?
     #      infer_hints on Ops?
     logger.debug('is_positive: %s' % str(v))
     if v.owner and v.owner.op == tensor.pow:
@@ -257,6 +262,18 @@ def is_positive(v):
         if 0 == exponent % 2:
             return True
     return False
+
+
+@register_canonicalize
+@local_optimizer([DimShuffle])
+def transinv_to_invtrans(node):
+    if isinstance(node.op, DimShuffle):
+        if node.op.new_order == (1, 0):
+            A, = node.inputs
+            if A.owner:
+                if isinstance(A.owner.op, MatrixInverse):
+                    X, = A.owner.inputs
+                    return [A.owner.op(node.op(X))]
 
 
 @register_stabilize
@@ -275,6 +292,33 @@ def inv_as_solve(node):
                 return [solve(r.owner.inputs[0].T, l.T).T]
 
 
+@register_stabilize
+@register_canonicalize
+@local_optimizer([Solve])
+def tag_solve_triangular(node):
+    """
+    If a general solve() is applied to the output of a cholesky op, then
+    replace it with a triangular solve.
+
+    """
+    if node.op == solve:
+        if node.op.A_structure == 'general':
+            A, b = node.inputs  # result is solution Ax=b
+            if A.owner and isinstance(A.owner.op, type(cholesky)):
+                if A.owner.op.lower:
+                    return [Solve('lower_triangular')(A, b)]
+                else:
+                    return [Solve('upper_triangular')(A, b)]
+            if (A.owner and isinstance(A.owner.op, DimShuffle)
+                and A.owner.op.new_order == (1, 0)):
+                A_T, = A.owner.inputs
+                if A_T.owner and isinstance(A_T.owner.op, type(cholesky)):
+                    if A_T.owner.op.lower:
+                        return [Solve('upper_triangular')(A, b)]
+                    else:
+                        return [Solve('lower_triangular')(A, b)]
+
+
 @register_canonicalize
 @register_stabilize
 @register_specialize
@@ -283,19 +327,19 @@ def no_transpose_symmetric(node):
     if isinstance(node.op, DimShuffle):
         x = node.inputs[0]
         if x.type.ndim == 2 and is_symmetric(x):
-            #print 'UNDOING TRANSPOSE', is_symmetric(x), x.ndim
+            # print 'UNDOING TRANSPOSE', is_symmetric(x), x.ndim
             if node.op.new_order == [1, 0]:
                 return [x]
 
 
 @register_stabilize
-@local_optimizer(None) # XXX: solve is defined later and can't be used here
+@local_optimizer(None)  # XXX: solve is defined later and can't be used here
 def psd_solve_with_chol(node):
     if node.op == solve:
         A, b = node.inputs  # result is solution Ax=b
         if is_psd(A):
             L = cholesky(A)
-            #N.B. this can be further reduced to a yet-unwritten cho_solve Op
+            # N.B. this can be further reduced to a yet-unwritten cho_solve Op
             #     __if__ no other Op makes use of the the L matrix during the
             #     stabilization
             Li_b = Solve('lower_triangular')(L, b)
@@ -305,7 +349,7 @@ def psd_solve_with_chol(node):
 
 @register_stabilize
 @register_specialize
-@local_optimizer(None) # XXX: det is defined later and can't be used here
+@local_optimizer(None)  # XXX: det is defined later and can't be used here
 def local_det_chol(node):
     """
     If we have det(X) and there is already an L=cholesky(X)
@@ -336,7 +380,7 @@ def local_log_prod_sqr(node):
             if is_positive(p):
                 return [tensor.log(p).sum(axis=x.owner.op.axis)]
 
-            #TODO: have a reduction like prod and sum that simply
+            # TODO: have a reduction like prod and sum that simply
             #      returns the sign of the prod multiplication.
 
 
@@ -349,7 +393,7 @@ def local_log_pow(node):
         x, = node.inputs
         if x.owner and x.owner.op == tensor.pow:
             base, exponent = x.owner.inputs
-            #TODO: reason to be careful with dtypes?
+            # TODO: reason to be careful with dtypes?
             return [exponent * tensor.log(base)]
 
 
@@ -358,12 +402,13 @@ def spectral_radius_bound(X, log2_exponent):
     Returns upper bound on the largest eigenvalue of square symmetrix matrix X.
 
     log2_exponent must be a positive-valued integer. The larger it is, the
-    slower and tighter the bound.  Values up to 5 should usually suffice.  The
+    slower and tighter the bound. Values up to 5 should usually suffice. The
     algorithm works by multiplying X by itself this many times.
 
     From V.Pan, 1990. "Estimating the Extremal Eigenvalues of a Symmetric
     Matrix", Computers Math Applic. Vol 20 n. 2 pp 17-22.
     Rq: an efficient algorithm, not used here, is defined in this paper.
+
     """
     if X.type.ndim != 2:
         raise TypeError('spectral_radius_bound requires a matrix argument', X)

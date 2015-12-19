@@ -1,10 +1,11 @@
 import unittest
 
+from nose.plugins.skip import SkipTest
 import numpy
 
 import theano
-
 import theano.gof.op as op
+from six import string_types
 from theano.gof.type import Type, Generic
 from theano.gof.graph import Apply, Variable
 import theano.tensor as T
@@ -38,17 +39,27 @@ class MyType(Type):
     def filter(self, x, strict=False, allow_downcast=None):
         # Dummy filter: we want this type to represent strings that
         # start with `self.thingy`.
-        if not isinstance(x, basestring):
+        if not isinstance(x, string_types):
             raise TypeError("Invalid type")
         if not x.startswith(self.thingy):
             raise ValueError("Invalid value")
         return x
 
+    # Added to make those tests pass in DebugMode
+    @staticmethod
+    def may_share_memory(a, b):
+        # As this represent a string and string are immutable, they
+        # never share memory in the DebugMode sence. This is needed as
+        # Python reuse string internally.
+        return False
+
 
 class MyOp(Op):
 
+    __props__ = ()
+
     def make_node(self, *inputs):
-        inputs = map(as_variable, inputs)
+        inputs = list(map(as_variable, inputs))
         for input in inputs:
             if not isinstance(input.type, MyType):
                 raise Exception("Error 1")
@@ -61,18 +72,40 @@ MyOp = MyOp()
 class NoInputOp(Op):
 
     """An Op to test the corner-case of an Op with no input."""
-
-    def __eq__(self, other):
-        return type(self) == type(other)
-
-    def __hash__(self):
-        return hash(type(self))
+    __props__ = ()
 
     def make_node(self):
         return Apply(self, [], [MyType('test')()])
 
     def perform(self, node, inputs, output_storage):
         output_storage[0][0] = 'test Op no input'
+
+
+class StructOp(Op):
+    __props__ = ()
+
+    def do_constant_folding(self, node):
+        # we are not constant
+        return False
+
+    # The input only serves to distinguish thunks
+    def make_node(self, i):
+        return Apply(self, [i], [scalar.uint64()])
+
+    def c_support_code_struct(self, node, name):
+        return "npy_uint64 counter%s;" % (name,)
+
+    def c_init_code_struct(self, node, name, sub):
+        return "counter%s = 0;" % (name,)
+
+    def c_code(self, node, name, input_names, outputs_names, sub):
+        return """
+%(out)s = counter%(name)s;
+counter%(name)s++;
+""" % dict(out=outputs_names[0], name=name)
+
+    def c_code_cache_version(self):
+        return (1,)
 
 
 class TestOp:
@@ -92,7 +125,7 @@ class TestOp:
         try:
             MyOp(Generic()(), MyType(1)())  # MyOp requires MyType instances
             raise Exception("Expected an exception")
-        except Exception, e:
+        except Exception as e:
             if str(e) != "Error 1":
                 raise
 
@@ -102,17 +135,31 @@ class TestOp:
         rval = f()
         assert rval == 'test Op no input'
 
+    def test_op_struct(self):
+        if not theano.config.cxx:
+            raise SkipTest("G++ not available, so we need to skip this test.")
+        sop = StructOp()
+        c = sop(theano.tensor.constant(0))
+        mode = None
+        if theano.config.mode == 'FAST_COMPILE':
+            mode = 'FAST_RUN'
+        f = theano.function([], c, mode=mode)
+        rval = f()
+        assert rval == 0
+        rval = f()
+        assert rval == 1
+
+        c2 = sop(theano.tensor.constant(1))
+        f2 = theano.function([], [c, c2], mode=mode)
+        rval = f2()
+        assert rval == [0, 0]
+
 
 class TestMakeThunk(unittest.TestCase):
     def test_no_c_code(self):
         class IncOnePython(Op):
             """An Op with only a Python (perform) implementation"""
-
-            def __eq__(self, other):
-                return type(self) == type(other)
-
-            def __hash__(self):
-                return hash(type(self))
+            __props__ = ()
 
             def make_node(self, input):
                 input = scalar.as_scalar(input)
@@ -149,12 +196,7 @@ class TestMakeThunk(unittest.TestCase):
     def test_no_perform(self):
         class IncOneC(Op):
             """An Op with only a C (c_code) implementation"""
-
-            def __eq__(self, other):
-                return type(self) == type(other)
-
-            def __hash__(self):
-                return hash(type(self))
+            __props__ = ()
 
             def make_node(self, input):
                 input = scalar.as_scalar(input)
@@ -193,7 +235,7 @@ class TestMakeThunk(unittest.TestCase):
 
 
 def test_test_value_python_objects():
-    for x in (range(3), 0, 0.5, 1):
+    for x in ([0, 1, 2], 0, 0.5, 1):
         assert (op.get_test_value(x) == x).all()
 
 
@@ -303,16 +345,16 @@ def test_get_debug_values_exc():
 
         try:
             for x_val in op.get_debug_values(x):
-                #this assert catches the case where we
-                #erroneously get a value returned
+                # this assert catches the case where we
+                # erroneously get a value returned
                 assert False
             raised = False
         except AttributeError:
             raised = True
 
-        #this assert catches the case where we got []
-        #returned, and possibly issued a warning,
-        #rather than raising an exception
+        # this assert catches the case where we got []
+        # returned, and possibly issued a warning,
+        # rather than raising an exception
         assert raised
 
     finally:

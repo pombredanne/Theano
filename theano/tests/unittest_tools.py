@@ -1,15 +1,24 @@
+from __future__ import print_function
 from copy import copy, deepcopy
+from functools import wraps
 import logging
-from StringIO import StringIO
+from six.moves import StringIO
 import sys
 import unittest
 
+try:
+    from nose.plugins.attrib import attr
+except ImportError:
+    # This is an old version of nose
+    def attr(tag):
+        def func(f):
+            return f
+        return func
 import numpy
 
 import theano
 import theano.tensor as T
-from theano.configparser import config, AddConfigVar, StrParam
-from theano.gof.python25 import any
+from theano.configparser import config
 try:
     from nose.plugins.skip import SkipTest
 except ImportError:
@@ -18,22 +27,6 @@ except ImportError:
         Skip this test
         """
 _logger = logging.getLogger("theano.tests.unittest_tools")
-
-
-def good_seed_param(seed):
-    if seed == "random":
-        return True
-    try:
-        int(seed)
-    except Exception:
-        return False
-    return True
-
-AddConfigVar('unittests.rseed',
-             "Seed to use for randomized unit tests. "
-             "Special value 'random' means using a seed of None.",
-             StrParam(666, is_valid=good_seed_param),
-             in_c_key=False)
 
 
 def fetch_seed(pseed=None):
@@ -58,8 +51,8 @@ def fetch_seed(pseed=None):
         else:
             seed = None
     except ValueError:
-        print >> sys.stderr, ('Error: config.unittests.rseed contains '
-                              'invalid seed, using None instead')
+        print(('Error: config.unittests.rseed contains '
+                              'invalid seed, using None instead'), file=sys.stderr)
         seed = None
 
     return seed
@@ -73,8 +66,8 @@ def seed_rng(pseed=None):
 
     seed = fetch_seed(pseed)
     if pseed and pseed != seed:
-        print >> sys.stderr, 'Warning: using seed given by config.unittests.rseed=%i'\
-                'instead of seed %i given as parameter' % (seed, pseed)
+        print('Warning: using seed given by config.unittests.rseed=%i'\
+                'instead of seed %i given as parameter' % (seed, pseed), file=sys.stderr)
     numpy.random.seed(seed)
     return seed
 
@@ -103,7 +96,7 @@ verify_grad.E_grad = T.verify_grad.E_grad
 
 
 class TestOptimizationMixin(object):
-    def assertFunctionContains(self, f, op, min=1, max=sys.maxint):
+    def assertFunctionContains(self, f, op, min=1, max=sys.maxsize):
         toposort = f.maker.fgraph.toposort()
         matches = [node for node in toposort if node.op == op]
         assert (min <= len(matches) <= max), (toposort, matches,
@@ -118,7 +111,7 @@ class TestOptimizationMixin(object):
     def assertFunctionContainsN(self, f, op, N):
         return self.assertFunctionContains(f, op, min=N, max=N)
 
-    def assertFunctionContainsClass(self, f, op, min=1, max=sys.maxint):
+    def assertFunctionContainsClass(self, f, op, min=1, max=sys.maxsize):
         toposort = f.maker.fgraph.toposort()
         matches = [node for node in toposort if isinstance(node.op, op)]
         assert (min <= len(matches) <= max), (toposort, matches,
@@ -191,7 +184,7 @@ class InferShapeTester(unittest.TestCase):
         self.mode = mode.including("canonicalize")
 
     def _compile_and_check(self, inputs, outputs, numeric_inputs, cls,
-                           excluding=None, warn=True):
+                           excluding=None, warn=True, check_topo=True):
         """This tests the infer_shape method only
 
         When testing with input values with shapes that take the same
@@ -203,6 +196,9 @@ class InferShapeTester(unittest.TestCase):
         matrix instead of its height, then testing with only square
         matrices will not detect the problem. If warn=True, we emit a
         warning when testing with such values.
+
+        :param check_topo: If True, we check that the Op where removed
+            from the graph. False is useful to test not implemented case.
 
         """
         mode = self.mode
@@ -234,17 +230,18 @@ class InferShapeTester(unittest.TestCase):
         outputs_function = theano.function(inputs, outputs, mode=mode)
         shapes_function = theano.function(inputs, [o.shape for o in outputs],
                                           mode=mode)
-        #theano.printing.debugprint(shapes_function)
+        # theano.printing.debugprint(shapes_function)
         # Check that the Op is removed from the compiled function.
-        topo_shape = shapes_function.maker.fgraph.toposort()
-        assert not any(isinstance(t.op, cls) for t in topo_shape)
+        if check_topo:
+            topo_shape = shapes_function.maker.fgraph.toposort()
+            assert not any(isinstance(t.op, cls) for t in topo_shape)
         topo_out = outputs_function.maker.fgraph.toposort()
         assert any(isinstance(t.op, cls) for t in topo_out)
         # Check that the shape produced agrees with the actual shape.
         numeric_outputs = outputs_function(*numeric_inputs)
         numeric_shapes = shapes_function(*numeric_inputs)
         for out, shape in zip(numeric_outputs, numeric_shapes):
-            assert numpy.all(out.shape == shape)
+            assert numpy.all(out.shape == shape), (out.shape, shape)
 
 
 def str_diagnostic(expected, value, rtol, atol):
@@ -254,70 +251,62 @@ def str_diagnostic(expected, value, rtol, atol):
 
     try:
         ssio = StringIO()
-        print >> ssio, "           : shape, dtype, strides, min, max, n_inf, n_nan:"
-        print >> ssio, "  Expected :",
-        print >> ssio, expected.shape,
-        print >> ssio, expected.dtype,
-        print >> ssio, expected.strides,
-        print >> ssio, expected.min(),
-        print >> ssio, expected.max(),
-        print >> ssio, numpy.isinf(expected).sum(),
-        print >> ssio, numpy.isnan(expected).sum(),
+        print("           : shape, dtype, strides, min, max, n_inf, n_nan:", file=ssio)
+        print("  Expected :", end=' ', file=ssio)
+        print(expected.shape, end=' ', file=ssio)
+        print(expected.dtype, end=' ', file=ssio)
+        print(expected.strides, end=' ', file=ssio)
+        print(expected.min(), end=' ', file=ssio)
+        print(expected.max(), end=' ', file=ssio)
+        print(numpy.isinf(expected).sum(), end=' ', file=ssio)
+        print(numpy.isnan(expected).sum(), end=' ', file=ssio)
         # only if all succeeds to we add anything to sio
-        print >> sio, ssio.getvalue()
+        print(ssio.getvalue(), file=sio)
     except Exception:
         pass
     try:
         ssio = StringIO()
-        print >> ssio, "  Value    :",
-        print >> ssio, value.shape,
-        print >> ssio, value.dtype,
-        print >> ssio, value.strides,
-        print >> ssio, value.min(),
-        print >> ssio, value.max(),
-        print >> ssio, numpy.isinf(value).sum(),
-        print >> ssio, numpy.isnan(value).sum(),
+        print("  Value    :", end=' ', file=ssio)
+        print(value.shape, end=' ', file=ssio)
+        print(value.dtype, end=' ', file=ssio)
+        print(value.strides, end=' ', file=ssio)
+        print(value.min(), end=' ', file=ssio)
+        print(value.max(), end=' ', file=ssio)
+        print(numpy.isinf(value).sum(), end=' ', file=ssio)
+        print(numpy.isnan(value).sum(), end=' ', file=ssio)
         # only if all succeeds to we add anything to sio
-        print >> sio, ssio.getvalue()
+        print(ssio.getvalue(), file=sio)
     except Exception:
         pass
 
-    print >> sio, "  expected    :", expected
-    print >> sio, "  value    :", value
+    print("  expected    :", expected, file=sio)
+    print("  value    :", value, file=sio)
 
     try:
         ov = numpy.asarray(expected)
         nv = numpy.asarray(value)
         ssio = StringIO()
         absdiff = numpy.absolute(nv - ov)
-        print >> ssio, "  Max Abs Diff: ", numpy.max(absdiff)
-        print >> ssio, "  Mean Abs Diff: ", numpy.mean(absdiff)
-        print >> ssio, "  Median Abs Diff: ", numpy.median(absdiff)
-        print >> ssio, "  Std Abs Diff: ", numpy.std(absdiff)
+        print("  Max Abs Diff: ", numpy.max(absdiff), file=ssio)
+        print("  Mean Abs Diff: ", numpy.mean(absdiff), file=ssio)
+        print("  Median Abs Diff: ", numpy.median(absdiff), file=ssio)
+        print("  Std Abs Diff: ", numpy.std(absdiff), file=ssio)
         reldiff = numpy.absolute(nv - ov) / (numpy.absolute(nv) +
                                              numpy.absolute(ov))
-        print >> ssio, "  Max Rel Diff: ", numpy.max(reldiff)
-        print >> ssio, "  Mean Rel Diff: ", numpy.mean(reldiff)
-        print >> ssio, "  Median Rel Diff: ", numpy.median(reldiff)
-        print >> ssio, "  Std Rel Diff: ", numpy.std(reldiff)
+        print("  Max Rel Diff: ", numpy.max(reldiff), file=ssio)
+        print("  Mean Rel Diff: ", numpy.mean(reldiff), file=ssio)
+        print("  Median Rel Diff: ", numpy.median(reldiff), file=ssio)
+        print("  Std Rel Diff: ", numpy.std(reldiff), file=ssio)
         # only if all succeeds to we add anything to sio
-        print >> sio, ssio.getvalue()
+        print(ssio.getvalue(), file=sio)
     except Exception:
         pass
-    #Use the same formula as in _allclose to find the tolerance used
-    narrow = 'float32', 'complex64'
-    if ((str(expected.dtype) in narrow) or
-        (str(value.dtype) in narrow)):
-        atol_ = T.basic.float32_atol
-        rtol_ = T.basic.float32_rtol
-    else:
-        atol_ = T.basic.float64_atol
-        rtol_ = T.basic.float64_rtol
+    atol_, rtol_ = T.basic._get_atol_rtol(expected, value)
     if rtol is not None:
         rtol_ = rtol
     if atol is not None:
         atol_ = atol
-    print >> sio, "  rtol, atol:", rtol_, atol_
+    print("  rtol, atol:", rtol_, atol_, file=sio)
     return sio.getvalue()
 
 
@@ -337,3 +326,93 @@ class WrongValue(Exception):
 def assert_allclose(val1, val2, rtol=None, atol=None):
     if not T.basic._allclose(val1, val2, rtol, atol):
         raise WrongValue(val1, val2, rtol, atol)
+
+
+class AttemptManyTimes:
+    """Decorator for unit tests that forces a unit test to be attempted
+    multiple times. The test needs to pass a certain number of times for it to
+    be considered to have succeeded. If it doesn't pass enough times, it is
+    considered to have failed.
+
+    Warning : care should be exercised when using this decorator. For some
+    tests, the fact that they fail randomly could point to important issues
+    such as race conditions, usage of uninitialized memory region, etc. and
+    using this decorator could hide these problems.
+
+    Usage:
+        @AttemptManyTimes(n_attempts=5, n_req_successes=3)
+        def fct(args):
+            ...
+    """
+
+    def __init__(self, n_attempts, n_req_successes=1):
+        assert n_attempts >= n_req_successes
+        self.n_attempts = n_attempts
+        self.n_req_successes = n_req_successes
+
+    def __call__(self, fct):
+
+        # Wrap fct in a function that will attempt to run it multiple
+        # times and return the result if the test passes enough times
+        # of propagate the raised exception if it doesn't.
+        @wraps(fct)
+        def attempt_multiple_times(*args, **kwargs):
+
+            # Keep a copy of the current seed for unittests so that we can use
+            # a different seed for every run of the decorated test and restore
+            # the original after
+            original_seed = config.unittests.rseed
+            current_seed = original_seed
+
+            # If the decorator has received only one, unnamed, argument
+            # and that argument has an atribute _testMethodName, it means
+            # that the unit test on which the decorator is used is in a test
+            # class. This means that the setup() method of that class will
+            # need to be called before any attempts to execute the test in
+            # case it relies on data randomly generated in the class' setup()
+            # method.
+            if (len(args) == 1 and hasattr(args[0], "_testMethodName")):
+                test_in_class = True
+                class_instance = args[0]
+            else:
+                test_in_class = False
+
+            n_fail = 0
+            n_success = 0
+
+            # Attempt to call the test function multiple times. If it does
+            # raise any exception for at least one attempt, it passes. If it
+            # raises an exception at every attempt, it fails.
+            for i in range(self.n_attempts):
+                try:
+                    # Attempt to make the test use the current seed
+                    config.unittests.rseed = current_seed
+                    if test_in_class and hasattr(class_instance, "setUp"):
+                        class_instance.setUp()
+
+                    fct(*args, **kwargs)
+
+                    n_success += 1
+                    if n_success == self.n_req_successes:
+                        break
+
+                except Exception:
+                    n_fail += 1
+
+                    # If there is not enough attempts remaining to achieve the
+                    # required number of successes, propagate the original
+                    # exception
+                    if n_fail + self.n_req_successes > self.n_attempts:
+                        raise
+
+                finally:
+                    # Clean up after the test
+                    config.unittests.rseed = original_seed
+                    if test_in_class and hasattr(class_instance, "tearDown"):
+                        class_instance.tearDown()
+
+                    # Update the current_seed
+                    if current_seed not in [None, "random"]:
+                        current_seed = str(int(current_seed) + 1)
+
+        return attempt_multiple_times

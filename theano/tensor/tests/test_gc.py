@@ -1,6 +1,6 @@
-import cPickle
-import sys
 import numpy
+import six.moves.cPickle as pickle
+from six.moves import xrange
 import theano
 from theano import tensor as T
 import time
@@ -11,7 +11,7 @@ def test_no_reuse():
     y = T.lvector()
     f = theano.function([x, y], x + y)
 
-    #provide both inputs in the first call
+    # provide both inputs in the first call
     f(numpy.ones(10, dtype='int64'), numpy.ones(10, dtype='int64'))
 
     try:
@@ -24,7 +24,6 @@ def test_no_reuse():
 def test_gc_never_pickles_temporaries():
     x = T.dvector()
 
-    #print >> sys.stderr, 'BUILDING GRAPH'
     for i in xrange(2):  # TODO: 30 causes like LONG compilation due to MERGE
         if i:
             r = r + r/10
@@ -40,38 +39,37 @@ def test_gc_never_pickles_temporaries():
             (theano.OpWiseCLinker(allow_gc=True),
              theano.OpWiseCLinker(allow_gc=False))]:
 
-        #f_linker has garbage collection
+        # f_linker has garbage collection
 
-        #g_linker has no garbage collection
+        # g_linker has no garbage collection
 
-        #print >> sys.stderr, 'COMPILING'
         f = theano.function([x], r, mode=theano.Mode(optimizer=optimizer,
                                                      linker=f_linker))
         g = theano.function([x], r, mode=theano.Mode(optimizer=optimizer,
                                                      linker=g_linker))
 
-        len_pre_f = len(cPickle.dumps(f))
-        len_pre_g = len(cPickle.dumps(g))
+        len_pre_f = len(pickle.dumps(f))
+        len_pre_g = len(pickle.dumps(g))
 
-        # should be no difference at first
-        # In future, FunctionMaker might pickle linker-dependent stuff and make
-        # this assertion fail.
-        assert len_pre_f == len_pre_g
+        # We can't compare the content or the length of the string
+        # between f and g. 2 reason, we store some timming information
+        # in float. They won't be the same each time. Different float
+        # can have different lenght when printed.
 
         def a(fn):
-            return len(cPickle.dumps(fn.maker))
+            return len(pickle.dumps(fn.maker))
         assert a(f) == a(f)  # some sanity checks on the pickling mechanism
         assert a(g) == a(g)  # some sanity checks on the pickling mechanism
 
         def b(fn):
             return len(
-                cPickle.dumps(
+                pickle.dumps(
                     theano.compile.function_module._pickle_Function(
                         fn)))
         assert b(f) == b(f)  # some sanity checks on the pickling mechanism
 
         def c(fn):
-            return len(cPickle.dumps(fn))
+            return len(pickle.dumps(fn))
         assert c(f) == c(f)  # some sanity checks on the pickling mechanism
         assert c(g) == c(g)  # some sanity checks on the pickling mechanism
 
@@ -81,18 +79,21 @@ def test_gc_never_pickles_temporaries():
         g(numpy.ones(100, dtype='float64'))
 
         # serialize the functions again
-        post_f = cPickle.dumps(f)
-        post_g = cPickle.dumps(g)
+        post_f = pickle.dumps(f)
+        post_g = pickle.dumps(g)
         len_post_f = len(post_f)
         len_post_g = len(post_g)
 
-        #assert that f() didn't cause the function to grow
+        # assert that f() didn't cause the function to grow
         # allow_gc should leave the function un-changed by calling
         assert len_pre_f == len_post_f
 
-        #assert that g() didn't cause g to grow because temporaries
+        # assert that g() didn't cause g to grow because temporaries
         # that weren't collected shouldn't be pickled anyway
-        assert len_post_f == len_post_g, (f_linker, len_post_f, len_post_g)
+        # Allow for a couple of bytes of difference, since timing info,
+        # for instance, can be represented as text of varying size.
+        assert abs(len_post_f - len_post_g) < 128, (
+            f_linker, len_post_f, len_post_g)
 
 
 def test_merge_opt_runtime():
@@ -118,4 +119,4 @@ def test_merge_opt_runtime():
     dt = time.time() - t
 
     # it should never take longer than 5 seconds to compile this graph
-    assert dt < 5.0
+    assert dt < 5.0, dt

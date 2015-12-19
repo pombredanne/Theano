@@ -1,6 +1,8 @@
 #ifndef _CUDA_NDARRAY_H
 #define _CUDA_NDARRAY_H
 
+#include <algorithm>
+
 // Defines for Python 2/3 compatibility.
 #if PY_MAJOR_VERSION >= 3
 // Py3k treats all ints as longs. This one is not caught by npy_3kcompat.h.
@@ -17,6 +19,7 @@
 #define PyString_AsString PyUnicode_AsUTF8
 #define PyString_FromStringAndSize PyUnicode_FromStringAndSize
 #define PyString_Size PyUnicode_GET_SIZE
+#define PyInt_FromSize_t PyLong_FromSize_t
 
 // Python 3 expects a PyObject* as the first argument to PySlice_GetIndicesEx().
 #define SLICE_CAST(x) (x)
@@ -39,19 +42,26 @@
     #define SIZE_MAX ((size_t)-1)
 #endif
 
+// Cuda GPUs only accept a single representation for NaN whereas CPU may have
+// more than one. So it's better to use the CUDA one to be sure
+#ifdef NAN
+#undef NAN
+#endif
+#include <math_constants.h>
+#define NAN CUDART_NAN_F
 
 #include <cublas_v2.h>
 
 #ifdef _WIN32
-#ifdef _CUDA_NDARRAY_C
-#define DllExport   __declspec( dllexport )
-#else
-#define DllExport   __declspec( dllimport )
-#endif
-#define ALWAYS_INLINE
+# ifdef _CUDA_NDARRAY_C
+#  define DllExport   __declspec( dllexport )
+# else
+#  define DllExport   __declspec( dllimport )
+# endif
+# define ALWAYS_INLINE
 #else //else _WIN32
-#define DllExport
-#define ALWAYS_INLINE __attribute__((always_inline))
+# define DllExport __attribute__((visibility ("default")))
+# define ALWAYS_INLINE __attribute__((always_inline))
 #endif
 
 typedef float real;
@@ -73,6 +83,21 @@ typedef float real;
 #define CNDA_THREAD_SYNC cudaThreadSynchronize();
 #endif
 
+//If true, we release the GIL around blocking GPU calls, to allow other Python
+//threads to run in the meantime. For a single-threaded program, the overhead
+//is neglectible (about 20ms for 1 million GIL release/reclaim cycles). Can
+//still be overridden on compilation with -DRELEASE_GIL=0 in nvcc.flags.
+#ifndef RELEASE_GIL
+#define RELEASE_GIL 1
+#endif
+#if RELEASE_GIL
+#define CNDA_BEGIN_ALLOW_THREADS Py_BEGIN_ALLOW_THREADS
+#define CNDA_END_ALLOW_THREADS Py_END_ALLOW_THREADS
+#else
+#define CNDA_BEGIN_ALLOW_THREADS
+#define CNDA_END_ALLOW_THREADS
+#endif
+
 
 #ifndef SHARED_SIZE
 #define SHARED_SIZE (16*1024)
@@ -82,17 +107,91 @@ typedef float real;
 #define NO_VERBOSE_DEVICE_MALLOC 0
 
 /* Use this handle to make cublas calls */
-extern cublasHandle_t handle;
+extern DllExport cublasHandle_t handle;
 
 /**
- * Allocation and freeing of device memory should go through these functions so that the lib can track memory usage.
+ * Allocation and freeing of device memory should go through these functions so
+ * that the lib can track memory usage.
  *
  * device_malloc will set the Python error message before returning None.
  * device_free will return nonzero on failure (after setting the python error message)
+ *
+ * Set the Python error
  */
 DllExport void * device_malloc(size_t size);
 DllExport void * device_malloc(size_t size, int verbose);
 DllExport int device_free(void * ptr);
+DllExport void *get_work_mem(size_t sz);
+
+// Pointor to 1 int on the device
+// Used in CudaNdarray_TakeFrom and in an op
+// to tell that there is an out of bound error
+// When it is allocated, it should always be 0
+// So if there is an error, we must reset it to 0 BEFORE we raise the error
+// This prevent us from setting it to 0 before each use
+extern DllExport int* err_var;
+
+static inline int init_err_var(){
+    if (err_var == NULL) {
+        err_var = (int*)device_malloc(sizeof(int));
+        if (!err_var) { // PyErr set by device_malloc
+            return -1;
+        }
+        cudaError_t err = cudaMemset((void*)err_var, 0,
+                                     sizeof(int));
+        if (cudaSuccess != err) {
+            // Clear the error flag, cudaMemset doesn't do it.
+            cudaGetLastError();
+            PyErr_Format(
+                PyExc_RuntimeError,
+                "Error setting device error code to 0. %s",
+                cudaGetErrorString(err));
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static inline int check_err_var(){
+    //-10 could be any value different then 0.
+    int cpu_err_var=-10;
+    cudaError_t err;
+
+    CNDA_BEGIN_ALLOW_THREADS
+    // As we execute cudaMemcpy on the default stream, it waits
+    // for all kernels (on all streams) to be finished before
+    // starting to copy
+    err = cudaMemcpy(&cpu_err_var, err_var, sizeof(int),
+                     cudaMemcpyDeviceToHost);
+    CNDA_END_ALLOW_THREADS
+
+    if (cudaSuccess != err) {
+        PyErr_Format(
+            PyExc_RuntimeError,
+            "Cuda error: %s when trying to get the error"
+            " value.\\n",
+            cudaGetErrorString(err));
+        return -1;
+    }
+
+    if (cpu_err_var != 0) {
+        PyErr_Format(
+            PyExc_IndexError,
+            "One of the index value is out of bound. Error code: %i.\\n",
+            cpu_err_var);
+        // Must reset it to 0 to don't reset it before each use.
+        err = cudaMemset((void*)err_var, 0, sizeof(int));
+        if (cudaSuccess != err) {
+            PyErr_Format(PyExc_MemoryError,
+                "Error setting device error code to 0 after having"
+                " an index error. %s", cudaGetErrorString(err));
+            return -1;
+        }
+        return -1;
+    }
+    return 0;
+}
+
 
 template <typename T>
 static T ceil_intdiv(T a, T b)
@@ -146,6 +245,8 @@ enum operator_t
 /*
  * Return a CudaNdarray whose 'nd' dimensions are all 0.
  * if nd==-1, it is not initialized.
+ *
+ * Set the Python error
  */
 DllExport PyObject *
 CudaNdarray_New(int nd=-1);
@@ -276,7 +377,7 @@ DllExport float *CudaNdarray_DEV_DATA(const CudaNdarray * self);
 /**
  * Return the number of elements in the ndarray (product of the dimensions)
  */
-DllExport int CudaNdarray_SIZE(const CudaNdarray *self);
+DllExport size_t CudaNdarray_SIZE(const CudaNdarray *self);
 
 static PyObject *CudaNdarray_SIZE_Object(const CudaNdarray *self, void *closure);
 
@@ -284,6 +385,8 @@ static PyObject *CudaNdarray_SIZE_Object(const CudaNdarray *self, void *closure)
  * Allocate a new CudaNdarray with room for given number of dimensions
  *
  * No Storage space is allocated (and all dimensions are 0)
+ *
+ * Set the Python error
  */
 DllExport PyObject * CudaNdarray_new_nd(const int nd);
 
@@ -292,6 +395,8 @@ DllExport PyObject * CudaNdarray_new_nd(const int nd);
  *
  * Note: This does not allocate storage for data, or free
  *       pre-existing storage.
+ *
+ * Set the Python error
  */
 DllExport inline int ALWAYS_INLINE
 CudaNdarray_set_nd(CudaNdarray * self, const int nd)
@@ -368,8 +473,8 @@ static int CudaNdarray_alloc_contiguous(CudaNdarray *self, const int nd,
             //Detect overflow on unsigned integer
             if (dim[i] != 0 && size > (SIZE_MAX / dim[i])) {
                 PyErr_Format(PyExc_AssertionError,
-                             "Can't store in size_t for the bytes requested %llu",
-                             (unsigned long long)size);
+                             "Can't store in size_t for the bytes requested %llu * %llu",
+                             (unsigned long long)size, (unsigned long long)dim[i]);
                 return -1;
             }
             size = size * dim[i];
@@ -385,12 +490,20 @@ static int CudaNdarray_alloc_contiguous(CudaNdarray *self, const int nd,
             //Detect overflow on unsigned integer
             if (dim[i] != 0 && size > (SIZE_MAX / dim[i])) {
                 PyErr_Format(PyExc_AssertionError,
-                             "Can't store in size_t for the bytes requested %llu",
+                             "Can't store in size_t for the bytes requested %llu * 4",
                              (unsigned long long)size);
                 return -1;
             }
             size = size * dim[i];
         }
+    }
+
+    // Detect overflow on unsigned integer
+    if (size > (SIZE_MAX / sizeof(real))) {
+        PyErr_Format(PyExc_RuntimeError,
+                     "Can't store in size_t for the bytes requested %llu",
+                     (unsigned long long)size);
+        return -1;
     }
 
     // If the allocated buffer is already of the right size, we don't need to
@@ -436,6 +549,7 @@ static int CudaNdarray_alloc_contiguous(CudaNdarray *self, const int nd,
 
 /*
  * Return a CudaNdarray whose 'nd' dimensions are set to dims, and allocated.
+ * Set the python error.
  */
 template<typename inttype> 
 static PyObject *CudaNdarray_NewDims(int nd, const inttype * dims)
@@ -448,6 +562,9 @@ static PyObject *CudaNdarray_NewDims(int nd, const inttype * dims)
             Py_DECREF(rval);
             return NULL;
         }
+    }else{
+        PyErr_SetString(PyExc_MemoryError,
+                        "Failed to allocate the CudaNdarray structure.");
     }
     return (PyObject*)rval;
 }
@@ -477,6 +594,11 @@ DllExport PyObject * CudaNdarray_Copy(const CudaNdarray * self);
 DllExport PyObject * CudaNdarray_ReduceSum(CudaNdarray * self, PyObject * py_reduce_mask);
 
 /**
+ * Reshape self to the new shape gived by the tuple shape.
+ */
+DllExport PyObject * CudaNdarray_Reshape(CudaNdarray * self, PyObject * shape);
+
+/**
  * Transfer the contents of numpy array `obj` to `self`.
  *
  * self is reallocated to have the correct dimensions if necessary.
@@ -499,6 +621,8 @@ DllExport int CudaNdarray_CopyFromArray(CudaNdarray * self, PyArrayObject*obj);
  *               e.g. suppose self and other are 2D matrices and other
  *               has only one row. Then we need to copy this row several
  *               times when copying to self.
+ *
+ * Set the Python error
  */
 DllExport int CudaNdarray_CopyFromCudaNdarray(CudaNdarray * self,
         const CudaNdarray * other, bool unbroadcast = false);
@@ -569,6 +693,7 @@ DllExport int CudaNdarray_dimshuffle(CudaNdarray * self, unsigned int len, const
 DllExport PyObject*
 CudaNdarray_TakeFrom(CudaNdarray * self, PyObject *args);
 
+// Set the Python error
 int fprint_CudaNdarray(FILE * fd, const CudaNdarray *self);
 
 
@@ -583,6 +708,8 @@ DllExport int CudaNdarray_inplace_elemwise(PyObject* py_self, PyObject * py_othe
 // or a pointer to an ndarray of the right size. In the last case it will
 // not change.
 // If fortran is non-zero, a fortran order is expected/created
+//
+// Set the Python error
 DllExport int CudaNdarray_prep_output(CudaNdarray ** arr, int nd,
                                       const int * dims, int fortran = 0);
 

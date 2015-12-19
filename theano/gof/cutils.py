@@ -5,7 +5,7 @@ import sys
 from theano.compat import PY3
 from theano.gof.compilelock import get_lock, release_lock
 from theano import config
-import cmodule 
+from . import cmodule
 
 # TODO These two lines may be removed in the future, when we are 100% sure
 # noone has an old cutils_ext.so lying around anymore.
@@ -13,20 +13,22 @@ if os.path.exists(os.path.join(config.compiledir, 'cutils_ext.so')):
     os.remove(os.path.join(config.compiledir, 'cutils_ext.so'))
 
 
-def compile_cutils():
-    """Do just the compilation of cutils_ext"""
-
+def compile_cutils_code():
     types = ['npy_' + t for t in ['int8', 'int16', 'int32', 'int64', 'int128',
-        'int256', 'uint8', 'uint16', 'uint32', 'uint64', 'uint128', 'uint256',
-        'float16', 'float32', 'float64', 'float80', 'float96', 'float128',
-        'float256']]
+                                  'int256', 'uint8', 'uint16', 'uint32',
+                                  'uint64', 'uint128', 'uint256',
+                                  'float16', 'float32', 'float64',
+                                  'float80', 'float96', 'float128',
+                                  'float256']]
 
     complex_types = ['npy_' + t for t in ['complex32', 'complex64',
-        'complex128', 'complex160', 'complex192', 'complex512']]
+                                          'complex128', 'complex160',
+                                          'complex192', 'complex512']]
 
     inplace_map_template = """
     #if defined(%(typen)s)
-    static void %(type)s_inplace_add(PyArrayMapIterObject *mit, PyArrayIterObject *it)
+    static void %(type)s_inplace_add(PyArrayMapIterObject *mit,
+                                     PyArrayIterObject *it, int inc_or_set)
     {
         int index = mit->size;
         while (index--) {
@@ -39,70 +41,55 @@ def compile_cutils():
     #endif
     """
 
-    floatadd = "((%(type)s*)mit->dataptr)[0] = ((%(type)s*)mit->dataptr)[0] + ((%(type)s*)it->dataptr)[0];"
+    floatadd = ("((%(type)s*)mit->dataptr)[0] = "
+                "(inc_or_set ? ((%(type)s*)mit->dataptr)[0] : 0)"
+                " + ((%(type)s*)it->dataptr)[0];")
     complexadd = """
-    ((%(type)s*)mit->dataptr)[0].real = ((%(type)s*)mit->dataptr)[0].real + ((%(type)s*)it->dataptr)[0].real;
-    ((%(type)s*)mit->dataptr)[0].imag = ((%(type)s*)mit->dataptr)[0].imag + ((%(type)s*)it->dataptr)[0].imag;
+    ((%(type)s*)mit->dataptr)[0].real =
+        (inc_or_set ? ((%(type)s*)mit->dataptr)[0].real : 0)
+        + ((%(type)s*)it->dataptr)[0].real;
+    ((%(type)s*)mit->dataptr)[0].imag =
+        (inc_or_set ? ((%(type)s*)mit->dataptr)[0].imag : 0)
+        + ((%(type)s*)it->dataptr)[0].imag;
     """
 
     fns = ''.join([inplace_map_template % {'type': t, 'typen': t.upper(),
                                            'op': floatadd % {'type': t}}
-                        for t in types] +
+                   for t in types] +
                   [inplace_map_template % {'type': t, 'typen': t.upper(),
                                            'op': complexadd % {'type': t}}
-                        for t in complex_types])
+                   for t in complex_types])
+
+    def gen_binop(type, typen):
+        return """
+#if defined(%(typen)s)
+%(type)s_inplace_add,
+#endif
+""" % dict(type=type, typen=typen)
 
     fn_array = ("static inplace_map_binop addition_funcs[] = {" +
-            ''.join(["""
-            #if defined(%(typen)s)
-            %(type)s_inplace_add,
-            #endif
-            """ % {'type': t, 'typen': t.upper()}
-                for t in types + complex_types]) +
-            """NULL};
-            """)
+                ''.join([gen_binop(type=t, typen=t.upper())
+                         for t in types + complex_types]) + "NULL};\n")
+
+    def gen_num(typen):
+        return """
+#if defined(%(typen)s)
+%(typen)s,
+#endif
+""" % dict(type=type, typen=typen)
 
     type_number_array = ("static int type_numbers[] = {" +
-            ''.join(["""
-            #if defined(%(typen)s)
-            %(typen)s,
-            #endif
-            """ % {'type': t, 'typen': t.upper()}
-                for t in types + complex_types]) +
-            "-1000};")
+                         ''.join([gen_num(typen=t.upper())
+                                  for t in types + complex_types]) + "-1000};")
 
     code = ("""
-        #include <Python.h>
-        #include "numpy/arrayobject.h"
-
-        extern "C"{
-        static PyObject *
-        run_cthunk(PyObject *self, PyObject *args)
-        {
-          PyObject *py_cthunk = NULL;
-          if(!PyArg_ParseTuple(args,"O",&py_cthunk))
-            return NULL;
-
-          if (!PyCObject_Check(py_cthunk)) {
-            PyErr_SetString(PyExc_ValueError,
-                           "Argument to run_cthunk must be a PyCObject.");
-            return NULL;
-          }
-          void * ptr_addr = PyCObject_AsVoidPtr(py_cthunk);
-          int (*fn)(void*) = (int (*)(void*))(ptr_addr);
-          void* it = PyCObject_GetDesc(py_cthunk);
-          int failure = fn(it);
-
-          return Py_BuildValue("i", failure);
-        }
-
         #if NPY_API_VERSION >= 0x00000008
-        typedef void (*inplace_map_binop)(PyArrayMapIterObject *, PyArrayIterObject *);
-        """ + fns + fn_array + type_number_array +
-
-"""
+        typedef void (*inplace_map_binop)(PyArrayMapIterObject *,
+                                          PyArrayIterObject *, int inc_or_set);
+        """ + fns + fn_array + type_number_array + """
 static int
-map_increment(PyArrayMapIterObject *mit, PyObject *op, inplace_map_binop add_inplace)
+map_increment(PyArrayMapIterObject *mit, PyObject *op,
+              inplace_map_binop add_inplace, int inc_or_set)
 {
     PyArrayObject *arr = NULL;
     PyArrayIterObject *it;
@@ -130,7 +117,7 @@ map_increment(PyArrayMapIterObject *mit, PyObject *op, inplace_map_binop add_inp
         return -1;
     }
 
-    (*add_inplace)(mit, it);
+    (*add_inplace)(mit, it, inc_or_set);
 
     Py_DECREF(arr);
     Py_DECREF(it);
@@ -142,19 +129,21 @@ static PyObject *
 inplace_increment(PyObject *dummy, PyObject *args)
 {
     PyObject *arg_a = NULL, *index=NULL, *inc=NULL;
+    int inc_or_set = 1;
     PyArrayObject *a;
     inplace_map_binop add_inplace = NULL;
     int type_number = -1;
-    int i =0;
+    int i = 0;
     PyArrayMapIterObject * mit;
 
-    if (!PyArg_ParseTuple(args, "OOO", &arg_a, &index,
-            &inc)) {
+    if (!PyArg_ParseTuple(args, "OOO|i", &arg_a, &index,
+            &inc, &inc_or_set)) {
         return NULL;
     }
     if (!PyArray_Check(arg_a)) {
-         PyErr_SetString(PyExc_ValueError, "needs an ndarray as first argument");
-         return NULL;
+        PyErr_SetString(PyExc_ValueError,
+                        "needs an ndarray as first argument");
+        return NULL;
     }
 
     a = (PyArrayObject *) arg_a;
@@ -187,7 +176,7 @@ inplace_increment(PyObject *dummy, PyObject *args)
     if (mit == NULL) {
         goto fail;
     }
-    if (map_increment(mit, inc, add_inplace) != 0) {
+    if (map_increment(mit, inc, add_inplace, inc_or_set) != 0) {
         goto fail;
     }
 
@@ -202,9 +191,45 @@ fail:
     return NULL;
 }
         #endif
+""")
+
+    return code
 
 
-        static PyMethodDef CutilsExtMethods[] = {
+def compile_cutils():
+    """
+    Do just the compilation of cutils_ext.
+
+    """
+    code = ("""
+        #include <Python.h>
+        #include "numpy/arrayobject.h"
+        #include "theano_mod_helper.h"
+
+        extern "C"{
+        static PyObject *
+        run_cthunk(PyObject *self, PyObject *args)
+        {
+          PyObject *py_cthunk = NULL;
+          if(!PyArg_ParseTuple(args,"O",&py_cthunk))
+            return NULL;
+
+          if (!PyCObject_Check(py_cthunk)) {
+            PyErr_SetString(PyExc_ValueError,
+                           "Argument to run_cthunk must be a PyCObject.");
+            return NULL;
+          }
+          void * ptr_addr = PyCObject_AsVoidPtr(py_cthunk);
+          int (*fn)(void*) = (int (*)(void*))(ptr_addr);
+          void* it = PyCObject_GetDesc(py_cthunk);
+          int failure = fn(it);
+
+          return Py_BuildValue("i", failure);
+         }""")
+
+    code += compile_cutils_code()
+
+    code += ("""static PyMethodDef CutilsExtMethods[] = {
             {"run_cthunk",  run_cthunk, METH_VARARGS|METH_KEYWORDS,
              "Run a theano cthunk."},
             #if NPY_API_VERSION >= 0x00000008
@@ -214,7 +239,6 @@ fail:
             #endif
             {NULL, NULL, 0, NULL}        /* Sentinel */
         };""")
-
     if PY3:
         # This is not the most efficient code, but it is written this way to
         # highlight the changes needed to make 2.x code compile under python 3.
@@ -251,7 +275,7 @@ fail:
     if not os.path.exists(loc):
         try:
             os.mkdir(loc)
-        except OSError, e:
+        except OSError as e:
             assert e.errno == errno.EEXIST
             assert os.path.exists(loc), loc
 
@@ -271,14 +295,14 @@ try:
     if not os.path.exists(location):
         try:
             os.mkdir(location)
-        except OSError, e:
+        except OSError as e:
             assert e.errno == errno.EEXIST
             assert os.path.exists(location), location
     if not os.path.exists(os.path.join(location, '__init__.py')):
         open(os.path.join(location, '__init__.py'), 'w').close()
 
     try:
-        from cutils_ext.cutils_ext import *
+        from cutils_ext.cutils_ext import *  # noqa
     except ImportError:
         get_lock()
     # Ensure no-one else is currently modifying the content of the compilation
@@ -289,11 +313,11 @@ try:
                 # We must retry to import it as some other process could
                 # have been compiling it between the first failed import
                 # and when we receive the lock
-                from cutils_ext.cutils_ext import *
+                from cutils_ext.cutils_ext import *  # noqa
             except ImportError:
 
                 compile_cutils()
-                from cutils_ext.cutils_ext import *
+                from cutils_ext.cutils_ext import *  # noqa
 
         finally:
             # Release lock on compilation directory.

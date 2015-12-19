@@ -1,7 +1,7 @@
 """
 gof.py
 
-gof stands for Graph Optimization Framework
+gof stands for Graph Optimization Framework.
 
 The gof submodule of theano implements a framework
 for manipulating programs described as graphs. The
@@ -9,13 +9,13 @@ gof module defines basic theano graph concepts:
     -Apply nodes, which represent the application
 of an Op to Variables. Together these make up a
 graph.
-    -The Type, needed for Variables to make sense
+    -The Type, needed for Variables to make sense.
     -The FunctionGraph, which defines how a subgraph
-should be interpreted to implement a function
+should be interpreted to implement a function.
     -The Thunk, a callable object that becames part
-of the executable emitted by theano
+of the executable emitted by theano.
     -Linkers/VMs, the objects that call Thunks in
-sequence in order to execute a theano program
+sequence in order to execute a theano program.
 
 Conceptually, gof is intended to be sufficiently abstract
 that it could be used to implement a language other than
@@ -32,11 +32,11 @@ functionality. Ideally this should be refactored into
 a different submodule.
 
 For more details and discussion, see the theano-dev
-e-mail thread "What is gof?"
-"""
+e-mail thread "What is gof?".
 
+"""
 from theano.gof.cc import \
-    CLinker, OpWiseCLinker, DualLinker
+    CLinker, OpWiseCLinker, DualLinker, HideC
 
 # Also adds config vars
 from theano.gof.compiledir import \
@@ -55,13 +55,13 @@ from theano.gof.link import \
     Container, Linker, LocalLinker, PerformLinker, WrapLinker, WrapLinkerMany
 
 from theano.gof.op import \
-    Op, OpenMPOp, PureOp, ops_with_inner_function
+    Op, OpenMPOp, PureOp, COp, ops_with_inner_function
 
 from theano.gof.opt import (
     Optimizer,
     optimizer, inplace_optimizer,
     SeqOptimizer,
-    MergeOptimizer, MergeOptMerge,
+    MergeOptimizer,
     LocalOptimizer, local_optimizer, LocalOptGroup,
     OpSub, OpRemove, PatternSub,
     NavigatorOptimizer, TopoOptimizer, EquilibriumOptimizer,
@@ -74,7 +74,7 @@ from theano.gof.optdb import \
 from theano.gof.toolbox import \
     Feature, \
     Bookkeeper, History, Validator, ReplaceValidate, NodeFinder,\
-    PrintListener, ReplacementDidntRemovedError
+    PrintListener, ReplacementDidntRemovedError, NoOutputFromInplace
 
 from theano.gof.type import \
     Type, Generic, generic

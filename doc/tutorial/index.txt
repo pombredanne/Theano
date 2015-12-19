@@ -37,12 +37,15 @@ you out.
     loop
     sparse
     using_gpu
+    using_multi_gpu
     gpu_data_convert
     aliasing
     shape_info
     debug_faq
+    nan_tutorial
     profiling
     extending_theano
-    faq
+    extending_theano_c
     python-memory-management
     multi_cores
+    faq_tutorial

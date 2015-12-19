@@ -17,15 +17,21 @@
 # is relative to the documentation root, use os.path.abspath to make it
 # absolute, like shown here.
 #sys.path.append(os.path.abspath('some/directory'))
+import os
+import sys
+theano_path = os.path.join(os.path.dirname(__file__), os.pardir)
+sys.path.append(os.path.abspath(theano_path))
 
 # General configuration
 # ---------------------
 
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom ones.
-extensions = ['sphinx.ext.autodoc', 'sphinx.ext.todo']
+extensions = ['sphinx.ext.autodoc', 'sphinx.ext.todo', 'sphinx.ext.doctest', 'sphinx.ext.napoleon']
 
 todo_include_todos = True
+napoleon_google_docstring = False
+napoleon_include_special_with_doc = False
 
 try:
     from sphinx.ext import pngmath
@@ -45,15 +51,15 @@ master_doc = 'index'
 
 # General substitutions.
 project = 'Theano'
-copyright = '2008--2013, LISA lab'
+copyright = '2008--2015, LISA lab'
 
 # The default replacements for |version| and |release|, also used in various
 # other places throughout the built documents.
 #
 # The short X.Y version.
-version = '0.6'
+version = '0.7'
 # The full version, including alpha/beta/rc tags.
-release = '0.6'
+release = '0.7'
 
 # There are two options for replacing |today|: either, you set today to some
 # non-false value, then it is used:
@@ -116,7 +122,7 @@ html_logo = 'images/theano_logo_allblue_200x46.png'
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ['.static', 'images']
+html_static_path = ['.static', 'images', 'library/d3viz/examples']
 
 # If not '', a 'Last updated on:' timestamp is inserted at every page bottom,
 # using the given strftime format.

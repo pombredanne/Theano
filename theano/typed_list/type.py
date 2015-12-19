@@ -2,19 +2,23 @@ from theano import gof
 
 
 class TypedListType(gof.Type):
+    """
+
+    Parameters
+    ----------
+    ttype
+        Type of theano variable this list will contains, can be another list.
+    depth
+        Optionnal parameters, any value above 0 will create a nested list of
+        this depth. (0-based)
+
+    """
 
     def __init__(self, ttype, depth=0):
-        """
-        :Parameters:
-            -'ttype' : Type of theano variable this list
-            will contains, can be another list.
-            -'depth' : Optionnal parameters, any value
-            above 0 will create a nested list of this
-            depth. (0-based)
-        """
+
         if depth < 0:
             raise ValueError('Please specify a depth superior or'
-                            'equal to 0')
+                             'equal to 0')
         if not isinstance(ttype, gof.Type):
             raise TypeError('Expected a Theano Type')
 
@@ -25,10 +29,16 @@ class TypedListType(gof.Type):
 
     def filter(self, x, strict=False, allow_downcast=None):
         """
-        :Parameters:
-            -'x' : value to filter
-            -'strict' : if true, only native python list will be accepted
-            -'allow_downcast' : does not have any utility at the moment
+
+        Parameters
+        ----------
+        x
+            Value to filter.
+        strict
+            If true, only native python list will be accepted.
+        allow_downcast
+            Does not have any utility at the moment.
+
         """
         if strict:
             if not isinstance(x, list):
@@ -45,10 +55,10 @@ class TypedListType(gof.Type):
 
     def __eq__(self, other):
         """
-        two list are equals if they contains the same type.
-        """
+        Two lists are equal if they contain the same type.
 
-        return  type(self) == type(other) and self.ttype == other.ttype
+        """
+        return type(self) == type(other) and self.ttype == other.ttype
 
     def __hash__(self):
         return gof.hashtype(self) ^ hash(self.ttype)
@@ -58,8 +68,8 @@ class TypedListType(gof.Type):
 
     def get_depth(self):
         """
-        utilitary function to get the 0 based
-        level of the list
+        Utilitary function to get the 0 based level of the list.
+
         """
         if isinstance(self.ttype, TypedListType):
             return self.ttype.get_depth() + 1
@@ -75,6 +85,21 @@ class TypedListType(gof.Type):
                 return False
 
         return True
+
+    def may_share_memory(self, a, b):
+        if a is b:
+            return True
+        # As a list contain other element, if a or b isn't a list, we
+        # still need to check if that element is contained in the
+        # other list.
+        if not isinstance(a, list):
+            a = [a]
+        if not isinstance(b, list):
+            b = [b]
+        for idx1 in range(len(a)):
+            for idx2 in range(len(b)):
+                if self.ttype.may_share_memory(a[idx1], b[idx2]):
+                    return True
 
     def c_declare(self, name, sub, check_input=True):
         return """
@@ -112,3 +137,6 @@ class TypedListType(gof.Type):
 
     def c_code_cache_version(self):
         return (2,)
+
+    dtype = property(lambda self: self.ttype)
+    ndim = property(lambda self: self.ttype.ndim + 1)

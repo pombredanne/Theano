@@ -1,10 +1,5 @@
-import unittest
-
 import numpy
 import numpy.linalg
-from numpy.testing import assert_array_almost_equal
-from numpy.testing import dec, assert_array_equal, assert_allclose
-from numpy import inf
 
 import theano
 from theano import tensor, function
@@ -12,36 +7,21 @@ from theano.tensor.basic import _allclose
 from theano.tests.test_rop import break_op
 from theano.tests import unittest_tools as utt
 from theano import config
+from theano.tensor.nlinalg import MatrixInverse
+from theano.tensor import DimShuffle
 
 # The one in comment are not tested...
-from theano.sandbox.linalg.ops import (cholesky,
-                                       Cholesky,  # op class
-                                       CholeskyGrad,
+from theano.sandbox.linalg.ops import (Cholesky,  # op class
                                        matrix_inverse,
-                                       pinv,
                                        Solve,
-                                       diag,
-                                       ExtractDiag,
-                                       extract_diag,
-                                       AllocDiag,
-                                       alloc_diag,
-                                       det,
-                                       svd,
-                                       qr,
-                                       #PSD_hint,
-                                       trace,
-                                       matrix_dot,
+                                       solve,
+                                       # PSD_hint,
                                        spectral_radius_bound,
                                        imported_scipy,
-                                       Eig,
                                        inv_as_solve,
-                                       norm
                                        )
 
-from theano.sandbox.linalg import eig, eigh, eigvalsh
 from nose.plugins.skip import SkipTest
-from nose.plugins.attrib import attr
-from nose.tools import assert_raises
 
 
 def test_rop_lop():
@@ -137,3 +117,49 @@ def test_spectral_radius_bound():
     except ValueError:
         ok = True
     assert ok
+
+
+def test_transinv_to_invtrans():
+    X = tensor.matrix('X')
+    Y = tensor.nlinalg.matrix_inverse(X)
+    Z = Y.transpose()
+    f = theano.function([X], Z)
+    if config.mode != 'FAST_COMPILE':
+        for node in f.maker.fgraph.toposort():
+            if isinstance(node.op, MatrixInverse):
+                assert isinstance(node.inputs[0].owner.op, DimShuffle)
+            if isinstance(node.op, DimShuffle):
+                assert node.inputs[0].name == 'X'
+
+
+def test_tag_solve_triangular():
+    if not imported_scipy:
+        raise SkipTest("Scipy needed for the Cholesky op.")
+    cholesky_lower = Cholesky(lower=True)
+    cholesky_upper = Cholesky(lower=False)
+    A = tensor.matrix('A')
+    x = tensor.vector('x')
+    L = cholesky_lower(A)
+    U = cholesky_upper(A)
+    b1 = solve(L, x)
+    b2 = solve(U, x)
+    f = theano.function([A, x], b1)
+    if config.mode != 'FAST_COMPILE':
+        for node in f.maker.fgraph.toposort():
+            if isinstance(node.op, Solve):
+                assert node.op.A_structure == 'lower_triangular'
+    f = theano.function([A, x], b2)
+    if config.mode != 'FAST_COMPILE':
+        for node in f.maker.fgraph.toposort():
+            if isinstance(node.op, Solve):
+                assert node.op.A_structure == 'upper_triangular'
+
+
+def test_matrix_inverse_solve():
+    if not imported_scipy:
+        raise SkipTest("Scipy needed for the Solve op.")
+    A = theano.tensor.dmatrix('A')
+    b = theano.tensor.dmatrix('b')
+    node = matrix_inverse(A).dot(b).owner
+    [out] = inv_as_solve.transform(node)
+    assert isinstance(out.owner.op, Solve)               

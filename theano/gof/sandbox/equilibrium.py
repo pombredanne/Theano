@@ -1,17 +1,21 @@
+from __future__ import print_function
+
+from six.moves import reduce
+from six import string_types
 
 if 0:
     class _EquilibriumOptimizer(NavigatorOptimizer):
 
         def __init__(self,
                      local_optimizers,
-                     failure_callback = None,
-                     max_depth = None,
-                     max_use_ratio = None):
+                     failure_callback=None,
+                     max_depth=None,
+                     max_use_ratio=None):
 
             super(EquilibriumOptimizer, self).__init__(
                 None,
-                ignore_newtrees = False,
-                failure_callback = failure_callback)
+                ignore_newtrees=False,
+                failure_callback=failure_callback)
 
             self.local_optimizers = local_optimizers
             self.max_depth = max_depth
@@ -58,12 +62,12 @@ if 0:
             nodes = [node]
             while candidates:
                 for node in nodes:
-                    candidates = filter(node, depth)
+                    candidates = list(filter(node, depth))
                 depth += 1
                 _nodes = nodes
                 nodes = reduce(list.__iadd__,
                                [reduce(list.__iadd__,
-                                       [[n for n, i in out.clients if not isinstance(n, basestring)] for out in node.outputs],
+                                       [[n for n, i in out.clients if not isinstance(n, string_types)] for out in node.outputs],
                                        []) for node in nodes],
                                [])
                 candidates = tracks
@@ -79,7 +83,7 @@ if 0:
                 runs = None
 
             def importer(node):
-                #print 'IMPORTING', node
+                # print 'IMPORTING', node
                 self.backtrack(node, tasks)
             def pruner(node):
                 try:
@@ -94,19 +98,18 @@ if 0:
     #         for node in fgraph.apply_nodes:
     #             importer(node)
 
-
             for node in fgraph.toposort():
                 tasks[node].extend(lopt for track, i, lopt in self.fetch_tracks0(node.op))
 
             u = self.attach_updater(fgraph, importer, pruner, chin)
-            print 'KEYS', map(hash, tasks.keys())
+            print('KEYS', [hash(t) for t in tasks.keys()])
             while tasks:
-                for node in tasks.iterkeys():
+                for node in tasks:
                     todo = tasks.pop(node)
                     break
                 for lopt in todo:
                     if runs is not None and runs[lopt] >= max_uses:
-                        print >>sys.stderr, 'Warning: optimization exceeded its maximal use ratio: %s, %s' % (lopt, max_uses)
+                        print('Warning: optimization exceeded its maximal use ratio: %s, %s' % (lopt, max_uses), file=sys.stderr)
                         continue
                     success = self.process_node(fgraph, node, lopt)
                     if success:
@@ -121,7 +124,7 @@ if 0:
 #         for candidate in candidates:
 #             if candidate.current.inputs is not None:
 #                 for in1, in2 in zip(candidate.current.inputs, node.inputs):
-#                     if isinstance(in1, basestring):
+#                     if isinstance(in1, string_types):
 #                         candidate.match[in1] = in2
 #         for client in node.clients:
 

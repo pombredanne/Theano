@@ -5,6 +5,7 @@ import numpy.linalg
 from numpy.testing import assert_array_almost_equal
 from numpy.testing import dec, assert_array_equal, assert_allclose
 from numpy import inf
+from six.moves import xrange
 
 import theano
 from theano import tensor, function
@@ -37,9 +38,9 @@ from theano.tensor.nlinalg import ( MatrixInverse,
                                     norm,
                                     svd
                                     )
+from nose.plugins.attrib import attr
 
 from nose.plugins.skip import SkipTest
-from nose.plugins.attrib import attr
 from nose.tools import assert_raises
 
 
@@ -61,23 +62,39 @@ def test_pseudoinverse_correctness():
     assert _allclose(ri, numpy.linalg.pinv(r))
 
 
-def test_inverse_correctness():
-    rng = numpy.random.RandomState(utt.fetch_seed())
+class test_MatrixInverse(utt.InferShapeTester):
+    def setUp(self):
+        super(test_MatrixInverse, self).setUp()
+        self.op_class = MatrixInverse
+        self.op = matrix_inverse
+        self.rng = numpy.random.RandomState(utt.fetch_seed())
 
-    r = rng.randn(4, 4).astype(theano.config.floatX)
+    def test_inverse_correctness(self):
 
-    x = tensor.matrix()
-    xi = matrix_inverse(x)
+        r = self.rng.randn(4, 4).astype(theano.config.floatX)
 
-    ri = function([x], xi)(r)
-    assert ri.shape == r.shape
-    assert ri.dtype == r.dtype
+        x = tensor.matrix()
+        xi = self.op(x)
 
-    rir = numpy.dot(ri, r)
-    rri = numpy.dot(r, ri)
+        ri = function([x], xi)(r)
+        assert ri.shape == r.shape
+        assert ri.dtype == r.dtype
 
-    assert _allclose(numpy.identity(4), rir), rir
-    assert _allclose(numpy.identity(4), rri), rri
+        rir = numpy.dot(ri, r)
+        rri = numpy.dot(r, ri)
+
+        assert _allclose(numpy.identity(4), rir), rir
+        assert _allclose(numpy.identity(4), rri), rri
+
+    def test_infer_shape(self):
+
+        r = self.rng.randn(4, 4).astype(theano.config.floatX)
+
+        x = tensor.matrix()
+        xi = self.op(x)
+
+        self._compile_and_check([x], [xi], [r],
+                                self.op_class, warn=False)
 
 
 def test_matrix_dot():
@@ -124,7 +141,7 @@ def test_qr_modes():
         f = function([A], qr(A, "complete"))
         t_qr = f(a)
         assert _allclose(n_qr, t_qr)
-    except TypeError, e:
+    except TypeError as e:
         assert "name 'complete' is not defined" in str(e)
 
 
@@ -373,7 +390,7 @@ class test_Eig(utt.InferShapeTester):
 
     def test_eval(self):
         A = theano.tensor.matrix(dtype=self.dtype)
-        self.assertEquals([e.eval({A: [[1]]}) for e in self.op(A)],
+        self.assertEqual([e.eval({A: [[1]]}) for e in self.op(A)],
                           [[1.0], [[1.0]]])
         x = [[0, 1], [1, 0]]
         w, v = [e.eval({A: x}) for e in self.op(A)]
@@ -402,6 +419,14 @@ class test_Eigh(test_Eig):
 
 class test_Eigh_float32(test_Eigh):
     dtype = 'float32'
+
+    @utt.AttemptManyTimes(n_attempts=3, n_req_successes=2)
+    def test_uplo(self):
+        super(test_Eigh_float32, self).test_uplo()
+
+    @utt.AttemptManyTimes(n_attempts=3, n_req_successes=2)
+    def test_grad(self):
+        super(test_Eigh_float32, self).test_grad()
 
 
 class T_lstsq(unittest.TestCase):
@@ -436,7 +461,7 @@ class T_lstsq(unittest.TestCase):
         self.assertRaises(numpy.linalg.LinAlgError, f, [2, 1], [2, 1], [2, 1])
 
 
-class Matrix_power():
+class Matrix_power(unittest.TestCase):
 
     def test_numpy_compare(self):
         rng = numpy.random.RandomState(utt.fetch_seed())

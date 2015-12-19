@@ -15,6 +15,8 @@ from theano.tensor.blas_c import CGemv
 from theano.tensor.blas_scipy import ScipyGer
 from theano.tensor.blas import Gemv
 
+from theano.tensor.blas_c import check_force_gemv_init
+
 from theano.tests import unittest_tools
 from theano.tests.unittest_tools import TestOptimizationMixin
 
@@ -44,7 +46,7 @@ class TestCGer(TestCase, TestOptimizationMixin):
     def function(self, inputs, outputs):
         return theano.function(inputs, outputs,
                 mode=self.mode,
-                #allow_inplace=True,
+                # allow_inplace=True,
                 )
 
     def run_f(self, f):
@@ -55,23 +57,23 @@ class TestCGer(TestCase, TestOptimizationMixin):
         return tensor.as_tensor_variable(numpy.asarray(bval, dtype=self.dtype))
 
     def test_eq(self):
-        self.assert_(CGer(True) == CGer(True))
-        self.assert_(CGer(False) == CGer(False))
-        self.assert_(CGer(False) != CGer(True))
+        self.assertTrue(CGer(True) == CGer(True))
+        self.assertTrue(CGer(False) == CGer(False))
+        self.assertTrue(CGer(False) != CGer(True))
 
-        self.assert_(CGer(True) != ScipyGer(True))
-        self.assert_(CGer(False) != ScipyGer(False))
-        self.assert_(CGer(True) != Ger(True))
-        self.assert_(CGer(False) != Ger(False))
+        self.assertTrue(CGer(True) != ScipyGer(True))
+        self.assertTrue(CGer(False) != ScipyGer(False))
+        self.assertTrue(CGer(True) != Ger(True))
+        self.assertTrue(CGer(False) != Ger(False))
 
         # assert that eq works for non-CGer instances
-        self.assert_(CGer(False) is not None)
-        self.assert_(CGer(True) is not None)
+        self.assertTrue(CGer(False) is not None)
+        self.assertTrue(CGer(True) is not None)
 
     def test_hash(self):
-        self.assert_(hash(CGer(True)) == hash(CGer(True)))
-        self.assert_(hash(CGer(False)) == hash(CGer(False)))
-        self.assert_(hash(CGer(False)) != hash(CGer(True)))
+        self.assertTrue(hash(CGer(True)) == hash(CGer(True)))
+        self.assertTrue(hash(CGer(False)) == hash(CGer(False)))
+        self.assertTrue(hash(CGer(False)) != hash(CGer(True)))
 
     def test_optimization_pipeline(self):
         f = self.function([self.x, self.y], tensor.outer(self.x, self.y))
@@ -137,7 +139,10 @@ class TestCGemv(TestCase, TestOptimizationMixin):
 
         # Assert that the dot was optimized somehow
         self.assertFunctionContains0(f, tensor.dot)
-        self.assertFunctionContains1(f, CGemv(True))
+        self.assertFunctionContains1(
+            f,
+            CGemv(inplace=True, force_init_beta=True)
+        )
 
         # Assert they produce the same output
         assert numpy.allclose(f(self.xval, self.Aval),
@@ -155,7 +160,10 @@ class TestCGemv(TestCase, TestOptimizationMixin):
 
         # Assert that the dot was optimized somehow
         self.assertFunctionContains0(f, tensor.dot)
-        self.assertFunctionContains1(f, CGemv(True))
+        self.assertFunctionContains1(
+            f,
+            CGemv(inplace=True, force_init_beta=True)
+        )
 
         # Assert they produce the same output
         assert numpy.allclose(f(self.Aval, self.yval),
@@ -163,6 +171,14 @@ class TestCGemv(TestCase, TestOptimizationMixin):
         # Test with negative strides on 2 dims
         assert numpy.allclose(f(self.Aval[::-1, ::-1], self.yval),
                 numpy.dot(self.Aval[::-1, ::-1], self.yval))
+
+    def test_force_gemv_init(self):
+        if check_force_gemv_init():
+            sys.stderr.write(
+                "WARNING: The current BLAS requires Theano to initialize"
+                + " memory for some GEMV calls which will result in a minor"
+                + " degradation in performance for such calls."
+            )
 
     def t_gemv1(self, m_shp):
         ''' test vector2 + dot(matrix, vector1) '''
@@ -183,7 +199,7 @@ class TestCGemv(TestCase, TestOptimizationMixin):
         topo = [n.op for n in f.maker.fgraph.toposort()]
         assert topo == [CGemv(inplace=False)], topo
 
-        #test the inplace version
+        # test the inplace version
         g = theano.function([], [],
                 updates=[(v2, v2 + theano.dot(m, v1))],
                 mode=self.mode)
@@ -239,6 +255,22 @@ class TestCGemv(TestCase, TestOptimizationMixin):
         self.assertRaises(ValueError, f, A_val, ones_4, ones_5)
         self.assertRaises(ValueError, f, A_val, ones_3, ones_6)
         self.assertRaises(ValueError, f, A_val, ones_4, ones_6)
+
+    def test_multiple_inplace(self):
+        x = tensor.dmatrix('x')
+        y = tensor.dvector('y')
+        z = tensor.dvector('z')
+        f = theano.function([x, y, z],
+                            [tensor.dot(y, x), tensor.dot(z,x)],
+                            mode=mode_blas_opt)
+        vx = numpy.random.rand(3, 3)
+        vy = numpy.random.rand(3)
+        vz = numpy.random.rand(3)
+        out = f(vx, vy, vz)
+        assert numpy.allclose(out[0], numpy.dot(vy, vx))
+        assert numpy.allclose(out[1], numpy.dot(vz, vx))
+        assert len([n for n in f.maker.fgraph.apply_nodes
+                    if isinstance(n.op, tensor.AllocEmpty)]) == 2
 
 
 class TestCGemvFloat32(TestCase, BaseGemv, TestOptimizationMixin):

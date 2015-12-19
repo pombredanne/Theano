@@ -18,8 +18,10 @@
 - Others
    - :func:`softplus`
    - :func:`softmax`
+   - :func:`relu() <theano.tensor.nnet.relu>`
    - :func:`binary_crossentropy`
    - :func:`.categorical_crossentropy`
+   - :func:`h_softmax() <theano.tensor.nnet.h_softmax>`
 
 .. function:: sigmoid(x)
 
@@ -41,11 +43,13 @@
 
    Example:
 
-   .. code-block:: python
+   .. testcode::
 
-       x,y,b = T.dvectors('x','y','b')
+       import theano.tensor as T
+
+       x, y, b = T.dvectors('x', 'y', 'b')
        W = T.dmatrix('W')
-       y = T.nnet.sigmoid(T.dot(W,x) + b)
+       y = T.nnet.sigmoid(T.dot(W, x) + b)
 
    .. note:: The underlying code will return an exact 0 or 1 if an
       element of x is too small or too big.
@@ -101,7 +105,7 @@
 
    .. note:: The underlying code will return an exact 0 if an element of x is too small.
 
-   .. code-block:: python
+   .. testcode::
 
        x,y,b = T.dvectors('x','y','b')
        W = T.dmatrix('W')
@@ -119,22 +123,24 @@
     :note: this insert a particular op. But this op don't yet
        implement the Rop for hessian free. If you want that, implement
        this equivalent code that have the Rop implemented
-       ``exp(x)/exp(x).sum(1, keep_dims=True)``. Theano should
+       ``exp(x)/exp(x).sum(1, keepdims=True)``. Theano should
        optimize this by inserting the softmax op itself.  The code of
        the softmax op is more numeriacaly stable by using this code:
 
        .. code-block:: python
 
-           e_x = exp(x - x.max(axis=1, keep_dims=True))
-           out = e_x / e_x.sum(axis=1, keep_dims=True)
+           e_x = exp(x - x.max(axis=1, keepdims=True))
+           out = e_x / e_x.sum(axis=1, keepdims=True)
 
    Example of use:
 
-   .. code-block:: python
+   .. testcode::
 
        x,y,b = T.dvectors('x','y','b')
        W = T.dmatrix('W')
        y = T.nnet.softmax(T.dot(W,x) + b)
+
+.. autofunction:: theano.tensor.nnet.relu
 
 .. function:: binary_crossentropy(output,target)
 
@@ -152,10 +158,11 @@
    to the binary cross-entropy (note that this assumes that x will
    contain values between 0 and 1):
 
-   .. code-block:: python
+   .. testcode::
 
-       x, y, b = T.dvectors('x', 'y', 'b')
+       x, y, b, c = T.dvectors('x', 'y', 'b', 'c')
        W = T.dmatrix('W')
+       V = T.dmatrix('V')
        h = T.nnet.sigmoid(T.dot(W, x) + b)
        x_recons = T.nnet.sigmoid(T.dot(V, h) + c)
        recon_cost = T.nnet.binary_crossentropy(x_recons, x).mean()
@@ -188,8 +195,16 @@
        correct class (which is typically the training criterion in
        classification settings).
 
-   .. code-block:: python
+   .. testsetup::
+
+      import theano
+      o = theano.tensor.ivector()
+
+   .. testcode::
 
        y = T.nnet.softmax(T.dot(W, x) + b)
        cost = T.nnet.categorical_crossentropy(y, o)
        # o is either the above-mentioned 1-of-N vector or 2D tensor
+
+
+.. autofunction:: theano.tensor.nnet.h_softmax

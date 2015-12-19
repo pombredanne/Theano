@@ -1,7 +1,9 @@
 import errno
 import logging
 import os
+from six.moves import reload_module as reload
 import sys
+import warnings
 
 import numpy
 
@@ -13,10 +15,9 @@ from theano.gof import cmodule
 
 
 _logger = logging.getLogger('theano.scan_module.scan_perform')
-_logger.setLevel(logging.WARN)
 
 
-version = 0.280  # must match constant returned in function get_version()
+version = 0.293  # must match constant returned in function get_version()
 
 need_reload = False
 
@@ -54,17 +55,33 @@ except ImportError:
             if version != getattr(scan_perform, '_version', None):
                 raise ImportError()
         except ImportError:
-
+            if not theano.config.cxx:
+                raise ImportError("no c compiler, can't compile cython code")
             _logger.info("Compiling C code for scan")
             dirname = 'scan_perform'
             cfile = os.path.join(theano.__path__[0], 'scan_module',
                                  'scan_perform.c')
+            if not os.path.exists(cfile):
+                # This can happen in not normal case. We just
+                # disable the cython code. If we are here the user
+                # didn't disable the compiler, so print a warning.
+                warnings.warn(
+                    "The file scan_perform.c is not available. This do"
+                    "not happen normally. You are probably in a strange"
+                    "setup. This mean Theano can not use the cython code for "
+                    "scan. If you"
+                    "want to remove this warning, use the Theano flag"
+                    "'cxx=' (set to an empty string) to disable all c"
+                    "code generation."
+                )
+                raise ImportError("The file lazylinker_c.c is not available.")
+
             code = open(cfile).read()
             loc = os.path.join(config.compiledir, dirname)
             if not os.path.exists(loc):
                 try:
                     os.mkdir(loc)
-                except OSError, e:
+                except OSError as e:
                     assert e.errno == errno.EEXIST
                     assert os.path.exists(loc)
 
@@ -75,7 +92,7 @@ except ImportError:
             # by Theano. As by default, we tell NumPy to don't import
             # the old interface.
             if False:
-                #During scan cython development, it is helpful to keep the old interface, to don't manually edit the c file each time.
+                # During scan cython development, it is helpful to keep the old interface, to don't manually edit the c file each time.
                 preargs.remove('-D NPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION')
             else:
                 numpy_ver = [int(n) for n in numpy.__version__.split('.')[:2]]
@@ -93,7 +110,8 @@ except ImportError:
                     preargs.append("-D NPY_F_CONTIGUOUS=NPY_ARRAY_F_CONTIGUOUS")
 
             cmodule.GCC_compiler.compile_str(dirname, code, location=loc,
-                                             preargs=preargs)
+                                             preargs=preargs,
+                                             hide_symbols=False)
             # Save version into the __init__.py file.
             init_py = os.path.join(loc, '__init__.py')
             open(init_py, 'w').write('_version = %s\n' % version)
@@ -114,5 +132,10 @@ except ImportError:
         # Release lock on compilation directory.
         release_lock()
 
-from scan_perform.scan_perform import *
+# This is caused as cython use the old NumPy C-API but we use the new one.
+# To fix it completly, we would need to modify Cython to use the new API.
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore",
+                            message="numpy.ndarray size changed")
+    from scan_perform.scan_perform import *
 assert version == get_version()
